@@ -502,6 +502,24 @@ button:active {
   background: rgba(250, 204, 21, 0.15);
 }
 
+.leave-group-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.6);
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  cursor: pointer;
+}
+
+.leave-group-btn:hover {
+  background: rgba(239, 68, 68, 0.35);
+}
+
+.leave-group-btn.hidden {
+  display: none;
+}
+
 .call-actions {
   display: flex;
   gap: 8px;

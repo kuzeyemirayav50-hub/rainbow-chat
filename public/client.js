@@ -37,6 +37,7 @@
   const groupMembersCheckboxes = document.getElementById("group-members-checkboxes");
   const createGroupCancelBtn = document.getElementById("create-group-cancel-btn");
   const panelTabs = document.querySelectorAll(".panel-tab");
+  const leaveGroupBtn = document.getElementById("leave-group-btn");
 
   // Refresh sonrası son kullanıcı adını hatırla (giriş ekranında doldur)
   try {
@@ -396,6 +397,7 @@
         activeGroupId = null;
         activeChatUser = username;
         unreadCounts[username] = 0;
+        if (leaveGroupBtn) leaveGroupBtn.classList.add("hidden");
 
         if (chatTitleEl && chatSubtitleEl) {
           chatTitleEl.textContent = username;
@@ -458,6 +460,7 @@
           chatSubtitleEl.textContent = "Grup sohbeti • " + (g.members || []).join(", ");
         }
         if (messageInput) messageInput.placeholder = g.name + " grubuna mesaj yaz...";
+        if (leaveGroupBtn) leaveGroupBtn.classList.remove("hidden");
         callAudioBtn.disabled = true;
         callVideoBtn.disabled = true;
         renderMessagesForGroup(g.id);
@@ -482,6 +485,34 @@
       switchPanel(tab.getAttribute("data-panel"));
     });
   });
+
+  async function leaveGroup() {
+    if (!activeGroupId || !currentUsername) return;
+    try {
+      const res = await fetch("/api/groups/leave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: currentUsername, groupId: activeGroupId }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) return;
+      if (socket) socket.emit("leaveGroup", activeGroupId);
+      groups = groups.filter((g) => g.id !== activeGroupId);
+      delete groupConversations[activeGroupId];
+      activeGroupId = null;
+      if (leaveGroupBtn) leaveGroupBtn.classList.add("hidden");
+      if (chatTitleEl && chatSubtitleEl) {
+        chatTitleEl.textContent = "Bir kullanıcı seç";
+        chatSubtitleEl.textContent =
+          "Soldan bir kullanıcı veya grup seç, mesajlaşmaya başla.";
+      }
+      if (messageInput) messageInput.placeholder = "Önce soldan bir seçim yap...";
+      if (messagesContainer) messagesContainer.innerHTML = "";
+      renderGroupList();
+    } catch {}
+  }
+
+  leaveGroupBtn?.addEventListener("click", leaveGroup);
 
   function maybeShowNotification(fromUsername, message) {
     if (!notificationsEnabled) return;

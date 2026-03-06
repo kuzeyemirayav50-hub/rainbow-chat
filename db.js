@@ -259,6 +259,13 @@ function createDb({ databaseUrl }) {
     return rows.length > 0;
   }
 
+  async function leaveGroup(groupId, username) {
+    await pool.query("DELETE FROM group_members WHERE group_id = $1 AND username = $2", [
+      groupId,
+      username,
+    ]);
+  }
+
   return {
     init,
     pool,
@@ -278,6 +285,7 @@ function createDb({ databaseUrl }) {
     getGroupsForUser,
     getGroup,
     isGroupMember,
+    leaveGroup,
   };
 }
 

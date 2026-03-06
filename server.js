@@ -625,6 +625,33 @@ app.post("/api/groups", (req, res) => {
   })();
 });
 
+// Gruptan çık
+app.post("/api/groups/leave", (req, res) => {
+  void (async () => {
+    const { username, groupId } = req.body || {};
+    const user = String(username || "").trim();
+    const gid = String(groupId || "").trim();
+    if (!user || !gid) return res.status(400).json({ error: "Eksik bilgi." });
+
+    if (db) {
+      const ok = await db.isGroupMember(gid, user);
+      if (!ok) return res.status(400).json({ error: "Grupta değilsin." });
+      await db.leaveGroup(gid, user);
+      return res.json({ ok: true });
+    }
+
+    const members = groupMembers.get(gid);
+    if (!members || !members.has(user)) return res.status(400).json({ error: "Grupta değilsin." });
+    members.delete(user);
+    if (members.size === 0) {
+      groups.delete(gid);
+      groupMembers.delete(gid);
+    }
+    savePersistence();
+    return res.json({ ok: true });
+  })();
+});
+
 // Kullanıcının gruplarını getir
 app.get("/api/groups", (req, res) => {
   void (async () => {
@@ -702,6 +729,11 @@ io.on("connection", (socket) => {
         if (isMember) socket.join("group:" + gid);
       }
     })();
+  });
+
+  socket.on("leaveGroup", (groupId) => {
+    const gid = String(groupId || "").trim();
+    if (gid) socket.leave("group:" + gid);
   });
 
   socket.on("groupMessage", ({ groupId, message }) => {
