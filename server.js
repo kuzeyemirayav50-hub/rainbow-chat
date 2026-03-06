@@ -10,6 +10,10 @@ const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
 
+function isMaintenanceMode() {
+  return String(process.env.MAINTENANCE_MODE || "").toLowerCase() === "true";
+}
+
 // Kayıtlı kullanıcılar (kalıcı değil, sunucu yeniden başlarsa sıfırlanır)
 // username -> { username, passwordHash }
 const registeredUsers = new Map();
@@ -30,6 +34,12 @@ const blocks = new Map();
 const friendRequestsIncoming = new Map();
 // outgoing: istek gönderen -> Set(hedef kullanıcı)
 const friendRequestsOutgoing = new Map();
+
+// Arama (WebRTC sinyalleşme) - sunucu sadece yönlendirir
+// callId -> { callId, fromUsername, toUsername, kind }
+const calls = new Map();
+// username -> Set<callId>
+const callsByUser = new Map();
 
 function ensureSet(map, key) {
   if (!map.has(key)) {
@@ -65,7 +75,63 @@ function emitRelationships(username) {
   }
 }
 
+function isBlocked(a, b) {
+  const setA = blocks.get(a);
+  if (setA && setA.has(b)) return true;
+  const setB = blocks.get(b);
+  if (setB && setB.has(a)) return true;
+  return false;
+}
+
+function areFriends(a, b) {
+  const fa = friends.get(a);
+  const fb = friends.get(b);
+  return Boolean(fa && fb && fa.has(b) && fb.has(a));
+}
+
+function canDirectMessage(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return false;
+  if (isBlocked(a, b)) return false;
+  if (!areFriends(a, b)) return false;
+  return true;
+}
+
+function emitToAllUserSockets(username, event, payload) {
+  const set = userSockets.get(username);
+  if (!set) return;
+  for (const id of set) {
+    io.to(id).emit(event, payload);
+  }
+}
+
 app.use(express.json());
+
+// Bakım modu: siteyi geçici olarak kapat
+app.use((req, res, next) => {
+  if (!isMaintenanceMode()) return next();
+
+  // Sağlık kontrolü
+  if (req.path === "/health") {
+    return res.status(200).json({ ok: true, maintenance: true });
+  }
+
+  // API istekleri
+  if (req.path.startsWith("/api/")) {
+    return res.status(503).json({ error: "Bakımdayız. Lütfen daha sonra dene." });
+  }
+
+  // HTML sayfası isteyenlere bakım sayfası
+  const acceptsHtml = String(req.headers.accept || "").includes("text/html");
+  if (req.method === "GET" && acceptsHtml) {
+    return res
+      .status(503)
+      .sendFile(path.join(__dirname, "public", "maintenance.html"));
+  }
+
+  return res.status(503).send("Bakımdayız. Lütfen daha sonra dene.");
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/", (req, res) => {
@@ -286,6 +352,12 @@ app.post("/api/block", (req, res) => {
 });
 
 io.on("connection", (socket) => {
+  if (isMaintenanceMode()) {
+    socket.emit("systemMessage", "Bakımdayız. Lütfen daha sonra tekrar dene.");
+    socket.disconnect(true);
+    return;
+  }
+
   socket.on("join", (username) => {
     const trimmedUsername = String(username || "").trim();
     if (!trimmedUsername) return;
@@ -320,24 +392,12 @@ io.on("connection", (socket) => {
     const time = new Date().toISOString();
 
     // Engelleme kontrolü
-    const fromBlockedSet = blocks.get(fromUsername);
-    const toBlockedSet = blocks.get(target);
-    if (
-      (fromBlockedSet && fromBlockedSet.has(target)) ||
-      (toBlockedSet && toBlockedSet.has(fromUsername))
-    ) {
+    if (isBlocked(fromUsername, target)) {
       return;
     }
 
     // Arkadaşlık kontrolü (karşılıklı arkadaş olmayanlara DM yok)
-    const fromFriends = friends.get(fromUsername);
-    const toFriends = friends.get(target);
-    if (
-      !fromFriends ||
-      !toFriends ||
-      !fromFriends.has(target) ||
-      !toFriends.has(fromUsername)
-    ) {
+    if (!areFriends(fromUsername, target)) {
       return;
     }
 
@@ -360,6 +420,105 @@ io.on("connection", (socket) => {
     socket.emit("privateMessage", payload);
   });
 
+  // --- WebRTC Signaling (sesli / görüntülü arama) ---
+  socket.on("call:offer", ({ callId, toUsername, kind, sdp }) => {
+    const fromUsername = socket.username || "";
+    const to = String(toUsername || "").trim();
+    const id = String(callId || "").trim();
+    const callKind = kind === "video" ? "video" : "audio";
+    if (!fromUsername || !to || !id || !sdp) return;
+
+    if (!canDirectMessage(fromUsername, to)) return;
+
+    // call kaydı
+    calls.set(id, { callId: id, fromUsername, toUsername: to, kind: callKind });
+    ensureSet(callsByUser, fromUsername).add(id);
+    ensureSet(callsByUser, to).add(id);
+
+    emitToAllUserSockets(to, "call:offer", {
+      callId: id,
+      fromUsername,
+      kind: callKind,
+      sdp,
+    });
+  });
+
+  socket.on("call:answer", ({ callId, sdp }) => {
+    const username = socket.username || "";
+    const id = String(callId || "").trim();
+    if (!username || !id || !sdp) return;
+
+    const call = calls.get(id);
+    if (!call) return;
+
+    // sadece taraflar cevaplayabilir
+    if (username !== call.toUsername && username !== call.fromUsername) return;
+
+    const other =
+      username === call.fromUsername ? call.toUsername : call.fromUsername;
+    emitToAllUserSockets(other, "call:answer", {
+      callId: id,
+      fromUsername: call.fromUsername,
+      toUsername: call.toUsername,
+      sdp,
+    });
+  });
+
+  socket.on("call:ice", ({ callId, candidate }) => {
+    const username = socket.username || "";
+    const id = String(callId || "").trim();
+    if (!username || !id || !candidate) return;
+
+    const call = calls.get(id);
+    if (!call) return;
+    if (username !== call.toUsername && username !== call.fromUsername) return;
+
+    const other =
+      username === call.fromUsername ? call.toUsername : call.fromUsername;
+    emitToAllUserSockets(other, "call:ice", {
+      callId: id,
+      candidate,
+    });
+  });
+
+  socket.on("call:reject", ({ callId }) => {
+    const username = socket.username || "";
+    const id = String(callId || "").trim();
+    if (!username || !id) return;
+    const call = calls.get(id);
+    if (!call) return;
+    if (username !== call.toUsername && username !== call.fromUsername) return;
+
+    const other =
+      username === call.fromUsername ? call.toUsername : call.fromUsername;
+    emitToAllUserSockets(other, "call:reject", { callId: id });
+
+    calls.delete(id);
+    const a = callsByUser.get(call.fromUsername);
+    if (a) a.delete(id);
+    const b = callsByUser.get(call.toUsername);
+    if (b) b.delete(id);
+  });
+
+  socket.on("call:hangup", ({ callId }) => {
+    const username = socket.username || "";
+    const id = String(callId || "").trim();
+    if (!username || !id) return;
+    const call = calls.get(id);
+    if (!call) return;
+    if (username !== call.toUsername && username !== call.fromUsername) return;
+
+    const other =
+      username === call.fromUsername ? call.toUsername : call.fromUsername;
+    emitToAllUserSockets(other, "call:hangup", { callId: id });
+
+    calls.delete(id);
+    const a = callsByUser.get(call.fromUsername);
+    if (a) a.delete(id);
+    const b = callsByUser.get(call.toUsername);
+    if (b) b.delete(id);
+  });
+
   socket.on("disconnect", () => {
     const username = sockets.get(socket.id);
     if (username) {
@@ -369,6 +528,25 @@ io.on("connection", (socket) => {
         set.delete(socket.id);
         if (set.size === 0) {
           userSockets.delete(username);
+
+          // Kullanıcı tamamen offline olduysa aktif çağrılarını düşür
+          const callSet = callsByUser.get(username);
+          if (callSet) {
+            for (const callId of callSet) {
+              const call = calls.get(callId);
+              if (!call) continue;
+              const other =
+                username === call.fromUsername
+                  ? call.toUsername
+                  : call.fromUsername;
+              emitToAllUserSockets(other, "call:hangup", {
+                callId,
+                reason: "disconnect",
+              });
+              calls.delete(callId);
+            }
+            callsByUser.delete(username);
+          }
         }
       }
 

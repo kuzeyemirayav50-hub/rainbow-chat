@@ -11,6 +11,21 @@
   const userListEl = document.getElementById("user-list");
   const chatTitleEl = document.getElementById("chat-title");
   const chatSubtitleEl = document.getElementById("chat-subtitle");
+  const callAudioBtn = document.getElementById("call-audio-btn");
+  const callVideoBtn = document.getElementById("call-video-btn");
+  const callHangupBtn = document.getElementById("call-hangup-btn");
+  const callPanelEl = document.getElementById("call-panel");
+  const callStatusTitleEl = document.getElementById("call-status-title");
+  const callStatusSubtitleEl = document.getElementById("call-status-subtitle");
+  const toggleMicBtn = document.getElementById("toggle-mic-btn");
+  const toggleCamBtn = document.getElementById("toggle-cam-btn");
+  const localVideoEl = document.getElementById("local-video");
+  const remoteVideoEl = document.getElementById("remote-video");
+  const incomingModalEl = document.getElementById("incoming-call-modal");
+  const incomingTitleEl = document.getElementById("incoming-call-title");
+  const incomingSubtitleEl = document.getElementById("incoming-call-subtitle");
+  const incomingAcceptBtn = document.getElementById("incoming-accept-btn");
+  const incomingRejectBtn = document.getElementById("incoming-reject-btn");
   const messageForm = document.getElementById("message-form");
   const messageInput = document.getElementById("message-input");
   const messagesContainer = document.getElementById("messages");
@@ -30,6 +45,19 @@
 
   let notificationsEnabled = false;
   let windowFocused = true;
+
+  // WebRTC call state (1:1)
+  let pc = null;
+  let localStream = null;
+  let remoteStream = null;
+  let currentCallId = null;
+  let callKind = null; // "audio" | "video"
+  let incomingOffer = null; // { callId, fromUsername, kind, sdp }
+  let callPeerUsername = null;
+
+  const rtcConfig = {
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  };
 
   function formatTime(isoString) {
     const date = isoString ? new Date(isoString) : new Date();
@@ -275,6 +303,10 @@
           messageInput.placeholder = username + " için mesaj yaz...";
         }
 
+        // Arama butonları sadece arkadaş seçilince aktif
+        if (callAudioBtn) callAudioBtn.disabled = false;
+        if (callVideoBtn) callVideoBtn.disabled = false;
+
         renderMessagesFor(username);
         renderUserList();
       });
@@ -315,6 +347,242 @@
   window.addEventListener("focus", () => {
     windowFocused = true;
   });
+
+  function setCallPanelVisible(visible) {
+    if (!callPanelEl) return;
+    if (visible) callPanelEl.classList.remove("hidden");
+    else callPanelEl.classList.add("hidden");
+  }
+
+  function setIncomingModalVisible(visible) {
+    if (!incomingModalEl) return;
+    if (visible) incomingModalEl.classList.remove("hidden");
+    else incomingModalEl.classList.add("hidden");
+  }
+
+  function setCallStatus(title, subtitle) {
+    if (callStatusTitleEl) callStatusTitleEl.textContent = title || "Arama";
+    if (callStatusSubtitleEl)
+      callStatusSubtitleEl.textContent = subtitle || "";
+  }
+
+  function setCallButtonsInCall(inCall) {
+    if (callHangupBtn) {
+      if (inCall) callHangupBtn.classList.remove("hidden");
+      else callHangupBtn.classList.add("hidden");
+    }
+    if (callAudioBtn) callAudioBtn.disabled = inCall || !activeChatUser;
+    if (callVideoBtn) callVideoBtn.disabled = inCall || !activeChatUser;
+  }
+
+  async function ensurePeerConnection() {
+    if (pc) return pc;
+    pc = new RTCPeerConnection(rtcConfig);
+
+    remoteStream = new MediaStream();
+    if (remoteVideoEl) {
+      remoteVideoEl.srcObject = remoteStream;
+    }
+
+    pc.ontrack = (event) => {
+      event.streams[0].getTracks().forEach((track) => {
+        remoteStream.addTrack(track);
+      });
+    };
+
+    pc.onicecandidate = (event) => {
+      if (!event.candidate || !socket || !currentCallId) return;
+      socket.emit("call:ice", { callId: currentCallId, candidate: event.candidate });
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (!pc) return;
+      if (pc.connectionState === "connected") {
+        setCallStatus("Arama bağlandı", callPeerUsername ? `${callPeerUsername} ile` : "");
+      } else if (pc.connectionState === "disconnected") {
+        setCallStatus("Bağlantı koptu", "Arama sonlandırılıyor...");
+      } else if (pc.connectionState === "failed") {
+        setCallStatus("Bağlantı başarısız", "Arama sonlandırılıyor...");
+      }
+    };
+
+    return pc;
+  }
+
+  async function startLocalMedia(kind) {
+    const constraints =
+      kind === "video"
+        ? { audio: true, video: { width: 1280, height: 720 } }
+        : { audio: true, video: false };
+
+    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    if (localVideoEl) {
+      localVideoEl.srcObject = localStream;
+    }
+
+    if (toggleMicBtn) toggleMicBtn.classList.add("active");
+    if (toggleCamBtn) {
+      if (kind === "video") toggleCamBtn.classList.add("active");
+      else toggleCamBtn.classList.remove("active");
+    }
+  }
+
+  function stopLocalMedia() {
+    if (localStream) {
+      localStream.getTracks().forEach((t) => t.stop());
+    }
+    localStream = null;
+    if (localVideoEl) localVideoEl.srcObject = null;
+  }
+
+  function resetCallState() {
+    currentCallId = null;
+    callKind = null;
+    callPeerUsername = null;
+    incomingOffer = null;
+  }
+
+  function cleanupCall() {
+    if (pc) {
+      try {
+        pc.ontrack = null;
+        pc.onicecandidate = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
+      } catch {
+        // ignore
+      }
+    }
+    pc = null;
+
+    stopLocalMedia();
+
+    remoteStream = null;
+    if (remoteVideoEl) remoteVideoEl.srcObject = null;
+
+    setCallPanelVisible(false);
+    setCallButtonsInCall(false);
+    setCallStatus("Arama", "");
+    resetCallState();
+  }
+
+  function newCallId() {
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  async function placeCall(kind) {
+    if (!socket) return;
+    if (!activeChatUser) return;
+    if (!isFriend(activeChatUser)) return;
+    if (pc) return;
+
+    callPeerUsername = activeChatUser;
+    callKind = kind;
+    currentCallId = newCallId();
+
+    setCallButtonsInCall(true);
+    setCallPanelVisible(true);
+    setCallStatus(kind === "video" ? "Görüntülü arama" : "Sesli arama", "Kamera/mikrofon izni bekleniyor...");
+
+    try {
+      await startLocalMedia(kind);
+      setCallStatus(
+        kind === "video" ? "Görüntülü arama" : "Sesli arama",
+        `${callPeerUsername} aranıyor...`
+      );
+
+      const peer = await ensurePeerConnection();
+      localStream.getTracks().forEach((track) => peer.addTrack(track, localStream));
+
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+
+      socket.emit("call:offer", {
+        callId: currentCallId,
+        toUsername: callPeerUsername,
+        kind,
+        sdp: offer,
+      });
+    } catch (err) {
+      setCallStatus("Arama başlatılamadı", "Kamera/mikrofon izni gerekli olabilir.");
+      cleanupCall();
+    }
+  }
+
+  async function acceptIncomingCall() {
+    if (!socket || !incomingOffer) return;
+    if (pc) return;
+
+    const { callId, fromUsername, kind, sdp } = incomingOffer;
+    currentCallId = callId;
+    callPeerUsername = fromUsername;
+    callKind = kind;
+
+    setIncomingModalVisible(false);
+    setCallButtonsInCall(true);
+    setCallPanelVisible(true);
+    setCallStatus(kind === "video" ? "Görüntülü arama" : "Sesli arama", "Kamera/mikrofon izni bekleniyor...");
+
+    try {
+      await startLocalMedia(kind);
+      setCallStatus(
+        kind === "video" ? "Görüntülü arama" : "Sesli arama",
+        `${fromUsername} ile bağlanılıyor...`
+      );
+
+      const peer = await ensurePeerConnection();
+      localStream.getTracks().forEach((track) => peer.addTrack(track, localStream));
+
+      await peer.setRemoteDescription(sdp);
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+
+      socket.emit("call:answer", { callId, sdp: answer });
+    } catch (err) {
+      socket.emit("call:reject", { callId });
+      cleanupCall();
+    }
+  }
+
+  function rejectIncomingCall() {
+    if (!socket || !incomingOffer) return;
+    socket.emit("call:reject", { callId: incomingOffer.callId });
+    setIncomingModalVisible(false);
+    incomingOffer = null;
+  }
+
+  function hangupCall() {
+    if (socket && currentCallId) {
+      socket.emit("call:hangup", { callId: currentCallId });
+    }
+    cleanupCall();
+  }
+
+  toggleMicBtn?.addEventListener("click", () => {
+    if (!localStream) return;
+    const audioTracks = localStream.getAudioTracks();
+    if (!audioTracks.length) return;
+    const enabled = !audioTracks[0].enabled;
+    audioTracks.forEach((t) => (t.enabled = enabled));
+    if (enabled) toggleMicBtn.classList.add("active");
+    else toggleMicBtn.classList.remove("active");
+  });
+
+  toggleCamBtn?.addEventListener("click", () => {
+    if (!localStream) return;
+    const videoTracks = localStream.getVideoTracks();
+    if (!videoTracks.length) return;
+    const enabled = !videoTracks[0].enabled;
+    videoTracks.forEach((t) => (t.enabled = enabled));
+    if (enabled) toggleCamBtn.classList.add("active");
+    else toggleCamBtn.classList.remove("active");
+  });
+
+  callAudioBtn?.addEventListener("click", () => placeCall("audio"));
+  callVideoBtn?.addEventListener("click", () => placeCall("video"));
+  callHangupBtn?.addEventListener("click", () => hangupCall());
+  incomingAcceptBtn?.addEventListener("click", () => acceptIncomingCall());
+  incomingRejectBtn?.addEventListener("click", () => rejectIncomingCall());
 
   async function sendFriendRequest(targetUsername) {
     try {
@@ -504,6 +772,65 @@
             onlineUsers.push(other);
           }
           renderUserList();
+        });
+
+        // --- WebRTC signaling events ---
+        socket.on("call:offer", (payload) => {
+          if (pc || incomingOffer) {
+            // meşgul: otomatik reddet
+            socket.emit("call:reject", { callId: payload.callId });
+            return;
+          }
+
+          incomingOffer = payload;
+          const from = payload.fromUsername;
+          const kind = payload.kind === "video" ? "video" : "audio";
+
+          if (incomingTitleEl) {
+            incomingTitleEl.textContent =
+              kind === "video" ? "Gelen görüntülü arama" : "Gelen sesli arama";
+          }
+          if (incomingSubtitleEl) {
+            incomingSubtitleEl.textContent = `${from} arıyor.`;
+          }
+
+          setIncomingModalVisible(true);
+          if (!windowFocused) {
+            maybeShowNotification(from, kind === "video" ? "Görüntülü arama" : "Sesli arama");
+          }
+        });
+
+        socket.on("call:answer", async ({ callId, sdp }) => {
+          if (!pc) return;
+          if (!currentCallId || callId !== currentCallId) return;
+          try {
+            await pc.setRemoteDescription(sdp);
+            setCallStatus("Arama bağlanıyor", "ICE tamamlanıyor...");
+          } catch {
+            hangupCall();
+          }
+        });
+
+        socket.on("call:ice", async ({ callId, candidate }) => {
+          if (!pc) return;
+          if (!currentCallId || callId !== currentCallId) return;
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch {
+            // ignore
+          }
+        });
+
+        socket.on("call:reject", ({ callId }) => {
+          if (!currentCallId || callId !== currentCallId) return;
+          setCallStatus("Arama reddedildi", "Karşı taraf aramayı kabul etmedi.");
+          cleanupCall();
+        });
+
+        socket.on("call:hangup", ({ callId }) => {
+          if (!currentCallId || callId !== currentCallId) return;
+          setCallStatus("Arama bitti", "Karşı taraf aramayı kapattı.");
+          cleanupCall();
         });
       } else {
         socket.emit("join", currentUsername);

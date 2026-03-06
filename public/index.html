@@ -83,8 +83,44 @@
                   mesajlar görünecek.
                 </p>
               </div>
-              <div class="user-pill" id="current-username-pill"></div>
+              <div class="header-actions">
+                <div class="call-actions">
+                  <button type="button" class="call-btn" id="call-audio-btn" disabled>
+                    Sesli Ara
+                  </button>
+                  <button type="button" class="call-btn" id="call-video-btn" disabled>
+                    Görüntülü Ara
+                  </button>
+                  <button type="button" class="call-btn danger hidden" id="call-hangup-btn">
+                    Bitir
+                  </button>
+                </div>
+                <div class="user-pill" id="current-username-pill"></div>
+              </div>
             </div>
+
+            <section class="call-panel hidden" id="call-panel">
+              <div class="call-panel-header">
+                <div>
+                  <div class="call-title" id="call-status-title">Arama</div>
+                  <div class="call-subtitle" id="call-status-subtitle">
+                    Bağlanılıyor...
+                  </div>
+                </div>
+                <div class="call-toggles">
+                  <button type="button" class="mini-btn" id="toggle-mic-btn">
+                    Mikrofon
+                  </button>
+                  <button type="button" class="mini-btn" id="toggle-cam-btn">
+                    Kamera
+                  </button>
+                </div>
+              </div>
+              <div class="video-grid" id="video-grid">
+                <video id="remote-video" autoplay playsinline></video>
+                <video id="local-video" autoplay playsinline muted></video>
+              </div>
+            </section>
 
             <div class="chat-window" id="messages"></div>
 
@@ -100,6 +136,21 @@
           </div>
         </div>
       </section>
+
+      <div class="modal hidden" id="incoming-call-modal">
+        <div class="modal-card">
+          <div class="modal-title" id="incoming-call-title">Gelen arama</div>
+          <div class="modal-subtitle" id="incoming-call-subtitle"></div>
+          <div class="modal-actions">
+            <button type="button" class="call-btn" id="incoming-accept-btn">
+              Kabul Et
+            </button>
+            <button type="button" class="call-btn danger" id="incoming-reject-btn">
+              Reddet
+            </button>
+          </div>
+        </div>
+      </div>
 
       <footer class="app-footer">
         <p>Rainbow Chat • Node.js &amp; Socket.IO ile gerçek zamanlı sohbet.</p>
