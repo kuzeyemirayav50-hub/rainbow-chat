@@ -21,6 +21,12 @@
   let onlineUsers = []; // string[]
   let activeChatUser = null;
   const conversations = {}; // username -> [{ fromUsername, toUsername, message, time }]
+  let relationships = {
+    friends: [],
+    blocked: [],
+    incomingRequests: [],
+    outgoingRequests: [],
+  };
 
   let notificationsEnabled = false;
   let windowFocused = true;
@@ -98,6 +104,14 @@
     scrollToBottom();
   }
 
+  function isFriend(username) {
+    return relationships.friends.includes(username);
+  }
+
+  function isBlocked(username) {
+    return relationships.blocked.includes(username);
+  }
+
   function renderUserList() {
     if (!userListEl) return;
     userListEl.innerHTML = "";
@@ -114,9 +128,17 @@
     }
 
     others.forEach((username) => {
+      const status = (() => {
+        if (relationships.blocked.includes(username)) return "blocked";
+        if (relationships.friends.includes(username)) return "friend";
+        if (relationships.incomingRequests.includes(username)) return "incoming";
+        if (relationships.outgoingRequests.includes(username)) return "outgoing";
+        return "none";
+      })();
+
       const item = document.createElement("div");
       item.className = "user-item";
-      if (activeChatUser === username) {
+      if (activeChatUser === username && status === "friend") {
         item.classList.add("active");
       }
 
@@ -133,14 +155,112 @@
       main.appendChild(dot);
       main.appendChild(name);
 
+      const rightSide = document.createElement("div");
+      rightSide.style.display = "flex";
+      rightSide.style.alignItems = "center";
+      rightSide.style.gap = "4px";
+
       const tag = document.createElement("span");
       tag.className = "user-tag";
-      tag.textContent = "Özel sohbet";
+      if (status === "friend") {
+        tag.textContent = "Arkadaş";
+      } else if (status === "incoming") {
+        tag.textContent = "İstek gönderdi";
+      } else if (status === "outgoing") {
+        tag.textContent = "İstek bekliyor";
+      } else if (status === "blocked") {
+        tag.textContent = "Engellendi";
+      } else {
+        tag.textContent = "Çevrimiçi";
+      }
+
+      rightSide.appendChild(tag);
+
+      // Aksiyon butonları
+      if (status === "incoming") {
+        const acceptBtn = document.createElement("button");
+        acceptBtn.type = "button";
+        acceptBtn.className = "user-tag";
+        acceptBtn.textContent = "Kabul Et";
+        acceptBtn.style.borderColor = "rgba(34,197,94,0.9)";
+        acceptBtn.style.color = "#bbf7d0";
+        acceptBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          respondFriend(username, true);
+        });
+
+        const rejectBtn = document.createElement("button");
+        rejectBtn.type = "button";
+        rejectBtn.className = "user-tag";
+        rejectBtn.textContent = "Reddet";
+        rejectBtn.style.borderColor = "rgba(239,68,68,0.9)";
+        rejectBtn.style.color = "#fecaca";
+        rejectBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          respondFriend(username, false);
+        });
+
+        rightSide.appendChild(acceptBtn);
+        rightSide.appendChild(rejectBtn);
+      } else if (status === "friend") {
+        const blockBtn = document.createElement("button");
+        blockBtn.type = "button";
+        blockBtn.className = "user-tag";
+        blockBtn.textContent = "Engelle";
+        blockBtn.style.borderColor = "rgba(239,68,68,0.9)";
+        blockBtn.style.color = "#fecaca";
+        blockBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          setBlock(username, true);
+        });
+        rightSide.appendChild(blockBtn);
+      } else if (status === "blocked") {
+        const unblockBtn = document.createElement("button");
+        unblockBtn.type = "button";
+        unblockBtn.className = "user-tag";
+        unblockBtn.textContent = "Engeli kaldır";
+        unblockBtn.style.borderColor = "rgba(59,130,246,0.9)";
+        unblockBtn.style.color = "#bfdbfe";
+        unblockBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          setBlock(username, false);
+        });
+        rightSide.appendChild(unblockBtn);
+      } else if (status === "none") {
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "user-tag";
+        addBtn.textContent = "Arkadaş ekle";
+        addBtn.style.borderColor = "rgba(129,140,248,0.9)";
+        addBtn.style.color = "#c7d2fe";
+        addBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          sendFriendRequest(username);
+        });
+
+        const blockBtn = document.createElement("button");
+        blockBtn.type = "button";
+        blockBtn.className = "user-tag";
+        blockBtn.textContent = "Engelle";
+        blockBtn.style.borderColor = "rgba(239,68,68,0.9)";
+        blockBtn.style.color = "#fecaca";
+        blockBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          setBlock(username, true);
+        });
+
+        rightSide.appendChild(addBtn);
+        rightSide.appendChild(blockBtn);
+      }
 
       item.appendChild(main);
-      item.appendChild(tag);
+      item.appendChild(rightSide);
 
       item.addEventListener("click", () => {
+        if (!isFriend(username)) {
+          return;
+        }
+
         activeChatUser = username;
 
         if (chatTitleEl && chatSubtitleEl) {
@@ -195,6 +315,56 @@
   window.addEventListener("focus", () => {
     windowFocused = true;
   });
+
+  async function sendFriendRequest(targetUsername) {
+    try {
+      await fetch("/api/friend-request", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ username: currentUsername, target: targetUsername }),
+      });
+    } catch {
+      // Sessizce geç
+    }
+  }
+
+  async function respondFriend(fromUser, accept) {
+    try {
+      await fetch("/api/friend-respond", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: currentUsername,
+          fromUser,
+          accept,
+        }),
+      });
+    } catch {
+      // Sessizce geç
+    }
+  }
+
+  async function setBlock(targetUsername, block) {
+    try {
+      await fetch("/api/block", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: currentUsername,
+          target: targetUsername,
+          block,
+        }),
+      });
+    } catch {
+      // Sessizce geç
+    }
+  }
   window.addEventListener("blur", () => {
     windowFocused = false;
   });
@@ -267,6 +437,37 @@
           renderUserList();
         });
 
+        socket.on("relationships", (data) => {
+          relationships = {
+            friends: Array.isArray(data?.friends) ? data.friends : [],
+            blocked: Array.isArray(data?.blocked) ? data.blocked : [],
+            incomingRequests: Array.isArray(data?.incomingRequests)
+              ? data.incomingRequests
+              : [],
+            outgoingRequests: Array.isArray(data?.outgoingRequests)
+              ? data.outgoingRequests
+              : [],
+          };
+
+          if (activeChatUser && !isFriend(activeChatUser)) {
+            activeChatUser = null;
+            if (chatTitleEl && chatSubtitleEl) {
+              chatTitleEl.textContent = "Bir kullanıcı seç";
+              chatSubtitleEl.textContent =
+                "Önce arkadaş ekle, sonra yalnızca arkadaşlarınla özel mesajlaş.";
+            }
+            if (messageInput) {
+              messageInput.placeholder =
+                "Önce soldan bir arkadaş seç...";
+            }
+            if (messagesContainer) {
+              messagesContainer.innerHTML = "";
+            }
+          }
+
+          renderUserList();
+        });
+
         socket.on("privateMessage", (payload) => {
           const { fromUsername, toUsername, message, time } = payload;
           const other =
@@ -331,6 +532,7 @@
     const msg = messageInput.value.trim();
     if (!msg) return;
     if (!activeChatUser) return;
+    if (!isFriend(activeChatUser)) return;
 
     socket.emit("privateMessage", {
       toUsername: activeChatUser,
