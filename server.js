@@ -3,6 +3,7 @@ const http = require("http");
 const path = require("path");
 const bcrypt = require("bcryptjs");
 const { Server } = require("socket.io");
+const { createDb } = require("./db");
 
 const app = express();
 const server = http.createServer(app);
@@ -41,6 +42,8 @@ const calls = new Map();
 // username -> Set<callId>
 const callsByUser = new Map();
 
+const db = createDb({ databaseUrl: process.env.DATABASE_URL });
+
 function ensureSet(map, key) {
   if (!map.has(key)) {
     map.set(key, new Set());
@@ -66,13 +69,22 @@ function getRelationships(username) {
   };
 }
 
+async function getRelationshipsUnified(username) {
+  if (db) {
+    return await db.getRelationships(username);
+  }
+  return getRelationships(username);
+}
+
 function emitRelationships(username) {
   const socketsForUser = userSockets.get(username);
   if (!socketsForUser) return;
-  const payload = getRelationships(username);
-  for (const id of socketsForUser) {
-    io.to(id).emit("relationships", payload);
-  }
+  void (async () => {
+    const payload = await getRelationshipsUnified(username);
+    for (const id of socketsForUser) {
+      io.to(id).emit("relationships", payload);
+    }
+  })();
 }
 
 function isBlocked(a, b) {
@@ -94,6 +106,24 @@ function canDirectMessage(a, b) {
   if (a === b) return false;
   if (isBlocked(a, b)) return false;
   if (!areFriends(a, b)) return false;
+  return true;
+}
+
+async function isBlockedUnified(a, b) {
+  if (db) return await db.isBlocked(a, b);
+  return isBlocked(a, b);
+}
+
+async function areFriendsUnified(a, b) {
+  if (db) return await db.areFriends(a, b);
+  return areFriends(a, b);
+}
+
+async function canDirectMessageUnified(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return false;
+  if (await isBlockedUnified(a, b)) return false;
+  if (!(await areFriendsUnified(a, b))) return false;
   return true;
 }
 
@@ -153,7 +183,11 @@ app.post("/api/register", async (req, res) => {
         .status(400)
         .json({ error: "Kullanıcı adı 3-24 karakter arasında olmalıdır." });
     }
-    if (registeredUsers.has(trimmedUsername)) {
+    if (db) {
+      if (await db.userExists(trimmedUsername)) {
+        return res.status(400).json({ error: "Bu kullanıcı adı zaten alınmış." });
+      }
+    } else if (registeredUsers.has(trimmedUsername)) {
       return res.status(400).json({ error: "Bu kullanıcı adı zaten alınmış." });
     }
     if (String(password).length < 4) {
@@ -162,11 +196,15 @@ app.post("/api/register", async (req, res) => {
         .json({ error: "Şifre en az 4 karakter olmalıdır." });
     }
 
-    const passwordHash = await bcrypt.hash(String(password), 10);
-    registeredUsers.set(trimmedUsername, {
-      username: trimmedUsername,
-      passwordHash,
-    });
+    if (db) {
+      await db.createUser({ username: trimmedUsername, password: String(password) });
+    } else {
+      const passwordHash = await bcrypt.hash(String(password), 10);
+      registeredUsers.set(trimmedUsername, {
+        username: trimmedUsername,
+        passwordHash,
+      });
+    }
 
     return res.json({ ok: true, username: trimmedUsername });
   } catch (err) {
@@ -185,14 +223,26 @@ app.post("/api/login", async (req, res) => {
     }
 
     const trimmedUsername = String(username).trim();
-    const user = registeredUsers.get(trimmedUsername);
-    if (!user) {
-      return res.status(401).json({ error: "Kullanıcı bulunamadı." });
-    }
+    if (db) {
+      const result = await db.verifyUser({
+        username: trimmedUsername,
+        password: String(password),
+      });
+      if (!result.ok) {
+        return res
+          .status(401)
+          .json({ error: result.reason === "bad_password" ? "Şifre hatalı." : "Kullanıcı bulunamadı." });
+      }
+    } else {
+      const user = registeredUsers.get(trimmedUsername);
+      if (!user) {
+        return res.status(401).json({ error: "Kullanıcı bulunamadı." });
+      }
 
-    const isMatch = await bcrypt.compare(String(password), user.passwordHash);
-    if (!isMatch) {
-      return res.status(401).json({ error: "Şifre hatalı." });
+      const isMatch = await bcrypt.compare(String(password), user.passwordHash);
+      if (!isMatch) {
+        return res.status(401).json({ error: "Şifre hatalı." });
+      }
     }
 
     return res.json({ ok: true, username: trimmedUsername });
@@ -204,6 +254,7 @@ app.post("/api/login", async (req, res) => {
 
 // Arkadaşlık isteği gönder
 app.post("/api/friend-request", (req, res) => {
+  void (async () => {
   const { username, target } = req.body || {};
   const from = String(username || "").trim();
   const to = String(target || "").trim();
@@ -216,6 +267,28 @@ app.post("/api/friend-request", (req, res) => {
       .status(400)
       .json({ error: "Kendine arkadaşlık isteği gönderemezsin." });
   }
+  if (db) {
+    if (!(await db.userExists(to))) {
+      return res.status(404).json({ error: "Bu kullanıcı mevcut değil." });
+    }
+    if (await db.isBlocked(from, to)) {
+      return res.status(403).json({ error: "Bu kullanıcıyla etkileşim engellenmiş." });
+    }
+    if (await db.areFriends(from, to)) {
+      return res.status(400).json({ error: "Zaten arkadaşsınız." });
+    }
+    // duplicate request check is handled by PK constraint; handle nicer message
+    try {
+      await db.sendFriendRequest({ from, to });
+    } catch {
+      return res.status(400).json({ error: "Zaten bekleyen bir isteğin var." });
+    }
+
+    emitRelationships(from);
+    emitRelationships(to);
+    return res.json({ ok: true });
+  }
+
   if (!registeredUsers.has(to)) {
     return res.status(404).json({ error: "Bu kullanıcı mevcut değil." });
   }
@@ -245,10 +318,12 @@ app.post("/api/friend-request", (req, res) => {
   emitRelationships(to);
 
   return res.json({ ok: true });
+  })();
 });
 
 // Arkadaşlık isteğine cevap ver
 app.post("/api/friend-respond", (req, res) => {
+  void (async () => {
   const { username, fromUser, accept } = req.body || {};
   const target = String(username || "").trim();
   const requester = String(fromUser || "").trim();
@@ -256,6 +331,22 @@ app.post("/api/friend-respond", (req, res) => {
 
   if (!target || !requester) {
     return res.status(400).json({ error: "Eksik bilgi." });
+  }
+
+  if (db) {
+    // Accept/reject is just "delete request" + optionally add friendship
+    try {
+      await db.deleteFriendRequest({ from: requester, to: target });
+    } catch {
+      return res.status(400).json({ error: "Böyle bir arkadaşlık isteği yok." });
+    }
+    if (acceptBool) {
+      await db.addFriendship(target, requester);
+    }
+
+    emitRelationships(target);
+    emitRelationships(requester);
+    return res.json({ ok: true });
   }
 
   const incomingSet = friendRequestsIncoming.get(target);
@@ -285,10 +376,12 @@ app.post("/api/friend-respond", (req, res) => {
   emitRelationships(requester);
 
   return res.json({ ok: true });
+  })();
 });
 
 // Engelle / engeli kaldır
 app.post("/api/block", (req, res) => {
+  void (async () => {
   const { username, target, block } = req.body || {};
   const user = String(username || "").trim();
   const other = String(target || "").trim();
@@ -299,6 +392,17 @@ app.post("/api/block", (req, res) => {
   }
   if (user === other) {
     return res.status(400).json({ error: "Kendini engelleyemezsin." });
+  }
+
+  if (db) {
+    await db.setBlock({ user, other, block: shouldBlock });
+    if (shouldBlock) {
+      await db.removeFriendship(user, other);
+      await db.clearRequestsBetween(user, other);
+    }
+    emitRelationships(user);
+    emitRelationships(other);
+    return res.json({ ok: true });
   }
 
   const blockedSet = ensureSet(blocks, user);
@@ -349,6 +453,7 @@ app.post("/api/block", (req, res) => {
   emitRelationships(other);
 
   return res.json({ ok: true });
+  })();
 });
 
 io.on("connection", (socket) => {
@@ -384,6 +489,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("privateMessage", ({ toUsername, message }) => {
+    void (async () => {
     const text = String(message || "").trim();
     const target = String(toUsername || "").trim();
     if (!text || !target) return;
@@ -391,13 +497,8 @@ io.on("connection", (socket) => {
     const fromUsername = socket.username || "Bilinmeyen";
     const time = new Date().toISOString();
 
-    // Engelleme kontrolü
-    if (isBlocked(fromUsername, target)) {
-      return;
-    }
-
-    // Arkadaşlık kontrolü (karşılıklı arkadaş olmayanlara DM yok)
-    if (!areFriends(fromUsername, target)) {
+    // Engelleme + arkadaşlık kontrolü (DB varsa DB üzerinden)
+    if (!(await canDirectMessageUnified(fromUsername, target))) {
       return;
     }
 
@@ -418,6 +519,7 @@ io.on("connection", (socket) => {
 
     // Gönderene de kendi mesajını yansıt
     socket.emit("privateMessage", payload);
+    })();
   });
 
   // --- WebRTC Signaling (sesli / görüntülü arama) ---
@@ -428,19 +530,21 @@ io.on("connection", (socket) => {
     const callKind = kind === "video" ? "video" : "audio";
     if (!fromUsername || !to || !id || !sdp) return;
 
-    if (!canDirectMessage(fromUsername, to)) return;
+    void (async () => {
+      if (!(await canDirectMessageUnified(fromUsername, to))) return;
 
-    // call kaydı
-    calls.set(id, { callId: id, fromUsername, toUsername: to, kind: callKind });
-    ensureSet(callsByUser, fromUsername).add(id);
-    ensureSet(callsByUser, to).add(id);
+      // call kaydı
+      calls.set(id, { callId: id, fromUsername, toUsername: to, kind: callKind });
+      ensureSet(callsByUser, fromUsername).add(id);
+      ensureSet(callsByUser, to).add(id);
 
-    emitToAllUserSockets(to, "call:offer", {
-      callId: id,
-      fromUsername,
-      kind: callKind,
-      sdp,
-    });
+      emitToAllUserSockets(to, "call:offer", {
+        callId: id,
+        fromUsername,
+        kind: callKind,
+        sdp,
+      });
+    })();
   });
 
   socket.on("call:answer", ({ callId, sdp }) => {
@@ -559,7 +663,21 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Rainbow Chat http://localhost:${PORT} adresinde çalışıyor`);
+async function start() {
+  if (db) {
+    await db.init();
+    console.log("DB aktif: kullanıcılar/arkadaşlıklar kalıcı olacak.");
+  } else {
+    console.log("DB yok: kullanıcılar/arkadaşlıklar sunucu yeniden başlarsa sıfırlanır.");
+  }
+
+  server.listen(PORT, () => {
+    console.log(`Rainbow Chat http://localhost:${PORT} adresinde çalışıyor`);
+  });
+}
+
+start().catch((err) => {
+  console.error("Startup error:", err);
+  process.exit(1);
 });
 

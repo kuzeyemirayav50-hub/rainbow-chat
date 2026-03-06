@@ -42,6 +42,7 @@
     incomingRequests: [],
     outgoingRequests: [],
   };
+  const unreadCounts = {}; // username -> number
 
   let notificationsEnabled = false;
   let windowFocused = true;
@@ -188,6 +189,14 @@
       rightSide.style.alignItems = "center";
       rightSide.style.gap = "4px";
 
+      const unread = unreadCounts[username] || 0;
+      if (unread > 0 && status === "friend") {
+        const badge = document.createElement("span");
+        badge.className = "unread-badge";
+        badge.textContent = unread > 99 ? "99+" : `+${unread}`;
+        rightSide.appendChild(badge);
+      }
+
       const tag = document.createElement("span");
       tag.className = "user-tag";
       if (status === "friend") {
@@ -290,6 +299,7 @@
         }
 
         activeChatUser = username;
+        unreadCounts[username] = 0;
 
         if (chatTitleEl && chatSubtitleEl) {
           chatTitleEl.textContent = username;
@@ -764,6 +774,7 @@
             messagesContainer.appendChild(el);
             scrollToBottom();
           } else if (fromUsername !== currentUsername) {
+            unreadCounts[other] = (unreadCounts[other] || 0) + 1;
             maybeShowNotification(fromUsername, message);
           }
 
