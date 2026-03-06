@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const express = require("express");
 const http = require("http");
 const path = require("path");
@@ -53,6 +54,9 @@ const groups = new Map();
 // groupId -> Set<username>
 const groupMembers = new Map();
 let nextGroupId = 1;
+
+// Oturum token'ları (refresh sonrası girişte kalmak için)
+const sessions = new Map(); // token -> username
 
 const db = createDb({ databaseUrl: process.env.DATABASE_URL });
 
@@ -250,6 +254,23 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
+// WebRTC ICE sunucuları (ses/görüntü araması için)
+app.get("/api/webrtc-config", (req, res) => {
+  const iceServers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+    { urls: "stun:stun.stunprotocol.org:3478" },
+  ];
+  const turnUrl = process.env.TURN_URL;
+  const turnUser = process.env.TURN_USERNAME;
+  const turnCred = process.env.TURN_CREDENTIAL;
+  if (turnUrl && turnUser && turnCred) {
+    iceServers.push({ urls: turnUrl, username: turnUser, credential: turnCred });
+  }
+  res.json({ iceServers });
+});
+
 app.post("/api/register", async (req, res) => {
   try {
     const { username, password } = req.body || {};
@@ -289,7 +310,9 @@ app.post("/api/register", async (req, res) => {
       savePersistence();
     }
 
-    return res.json({ ok: true, username: trimmedUsername });
+    const sessionToken = crypto.randomBytes(24).toString("hex");
+    sessions.set(sessionToken, trimmedUsername);
+    return res.json({ ok: true, username: trimmedUsername, sessionToken });
   } catch (err) {
     console.error("Register error:", err);
     return res.status(500).json({ error: "Beklenmeyen bir hata oluştu." });
@@ -328,11 +351,21 @@ app.post("/api/login", async (req, res) => {
       }
     }
 
-    return res.json({ ok: true, username: trimmedUsername });
+    const sessionToken = crypto.randomBytes(24).toString("hex");
+    sessions.set(sessionToken, trimmedUsername);
+    return res.json({ ok: true, username: trimmedUsername, sessionToken });
   } catch (err) {
     console.error("Login error:", err);
     return res.status(500).json({ error: "Beklenmeyen bir hata oluştu." });
   }
+});
+
+app.get("/api/session", (req, res) => {
+  const token = String(req.query.token || "").trim();
+  if (!token) return res.status(401).json({ ok: false });
+  const username = sessions.get(token);
+  if (!username) return res.status(401).json({ ok: false });
+  return res.json({ ok: true, username });
 });
 
 // Arkadaşlık isteği gönder

@@ -38,6 +38,12 @@
   const createGroupCancelBtn = document.getElementById("create-group-cancel-btn");
   const panelTabs = document.querySelectorAll(".panel-tab");
 
+  // Refresh sonrası son kullanıcı adını hatırla (giriş ekranında doldur)
+  try {
+    const lastUser = localStorage.getItem("rc_lastuser");
+    if (lastUser && authUsernameInput) authUsernameInput.value = lastUser;
+  } catch {}
+
   let socket = null;
   let currentUsername = "";
   let authMode = "login"; // "login" | "register"
@@ -46,6 +52,46 @@
   let activeGroupId = null;
   const conversations = {}; // username -> [{ fromUsername, toUsername, message, time }]
   const groupConversations = {}; // groupId -> [{ fromUsername, message, time }]
+  const MAX_STORED_MESSAGES = 150; // Tarayıcıda saklanacak son mesaj sayısı (sunucuyu yormamak)
+
+  function convStorageKey(other) {
+    if (!currentUsername || !other) return null;
+    return "rc_conv_" + [currentUsername, other].sort().join("_");
+  }
+  function loadConvFromStorage(other) {
+    const key = convStorageKey(other);
+    if (!key) return [];
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  }
+  function saveConvToStorage(other, msgs) {
+    const key = convStorageKey(other);
+    if (!key || !Array.isArray(msgs)) return;
+    try {
+      const trimmed = msgs.slice(-MAX_STORED_MESSAGES);
+      localStorage.setItem(key, JSON.stringify(trimmed));
+    } catch {}
+  }
+  function loadGroupFromStorage(gid) {
+    if (!gid) return [];
+    try {
+      const raw = localStorage.getItem("rc_group_" + gid);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  }
+  function saveGroupToStorage(gid, msgs) {
+    if (!gid || !Array.isArray(msgs)) return;
+    try {
+      const trimmed = msgs.slice(-MAX_STORED_MESSAGES);
+      localStorage.setItem("rc_group_" + gid, JSON.stringify(trimmed));
+    } catch {}
+  }
   let groups = []; // { id, name, createdBy, members }[]
   let relationships = {
     friends: [],
@@ -67,9 +113,25 @@
   let incomingOffer = null; // { callId, fromUsername, kind, sdp }
   let callPeerUsername = null;
 
-  const rtcConfig = {
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  // WebRTC config - sunucudan al (birden fazla STUN, TURN destekli)
+  let rtcConfig = {
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun.stunprotocol.org:3478" },
+    ],
   };
+
+  async function loadRtcConfig() {
+    try {
+      const res = await fetch("/api/webrtc-config");
+      const data = await res.json();
+      if (res.ok && Array.isArray(data?.iceServers) && data.iceServers.length) {
+        rtcConfig = { iceServers: data.iceServers };
+      }
+    } catch {}
+  }
 
   function formatTime(isoString) {
     const date = isoString ? new Date(isoString) : new Date();
@@ -126,6 +188,9 @@
 
   function renderMessagesFor(user) {
     if (!messagesContainer) return;
+    if (!conversations[user]) {
+      conversations[user] = loadConvFromStorage(user);
+    }
     messagesContainer.innerHTML = "";
     const history = conversations[user] || [];
     history.forEach((msg) => {
@@ -144,6 +209,9 @@
 
   function renderMessagesForGroup(groupId) {
     if (!messagesContainer) return;
+    if (!groupConversations[groupId]) {
+      groupConversations[groupId] = loadGroupFromStorage(groupId);
+    }
     messagesContainer.innerHTML = "";
     const history = groupConversations[groupId] || [];
     history.forEach((msg) => {
@@ -477,6 +545,7 @@
 
   async function ensurePeerConnection() {
     if (pc) return pc;
+    await loadRtcConfig();
     pc = new RTCPeerConnection(rtcConfig);
 
     remoteStream = new MediaStream();
@@ -500,9 +569,18 @@
       if (pc.connectionState === "connected") {
         setCallStatus("Arama bağlandı", callPeerUsername ? `${callPeerUsername} ile` : "");
       } else if (pc.connectionState === "disconnected") {
-        setCallStatus("Bağlantı koptu", "Arama sonlandırılıyor...");
+        setCallStatus("Bağlantı koptu", "Tekrar deniyor…");
       } else if (pc.connectionState === "failed") {
-        setCallStatus("Bağlantı başarısız", "Arama sonlandırılıyor...");
+        setCallStatus("Bağlantı kurulamadı", "Farklı ağda (örn. mobil veri) deneyin.");
+      } else if (pc.connectionState === "connecting") {
+        setCallStatus("Bağlanıyor", "ICE tamamlanıyor…");
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (!pc) return;
+      if (pc.iceConnectionState === "failed" && pc.connectionState !== "connected") {
+        setCallStatus("Bağlantı kurulamadı", "Ağ engeli olabilir; mobil veri deneyin.");
       }
     };
 
@@ -877,40 +955,14 @@
     });
   });
 
-  authForm?.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const username = authUsernameInput.value.trim();
-    const password = authPasswordInput.value;
-
-    if (!username || !password) {
-      if (authErrorEl) {
-        authErrorEl.textContent = "Kullanıcı adı ve şifre zorunlu.";
-      }
-      return;
-    }
-
+  function enterChat(username) {
+    currentUsername = username;
+    if (authErrorEl) authErrorEl.textContent = "";
     try {
-      const endpoint = authMode === "login" ? "/api/login" : "/api/register";
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ username, password }),
-      });
+      localStorage.setItem("rc_lastuser", currentUsername);
+    } catch {}
 
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        if (authErrorEl) {
-          authErrorEl.textContent = data.error || "Bir hata oluştu.";
-        }
-        return;
-      }
-
-      currentUsername = data.username;
-      if (authErrorEl) authErrorEl.textContent = "";
-
-      if (!socket) {
+    if (!socket) {
         socket = io({
           reconnection: true,
           reconnectionAttempts: Infinity,
@@ -991,6 +1043,7 @@
           if (!groupId) return;
           if (!groupConversations[groupId]) groupConversations[groupId] = [];
           groupConversations[groupId].push({ fromUsername, message, time });
+          saveGroupToStorage(groupId, groupConversations[groupId]);
           if (activeGroupId === groupId) {
             const isMe = fromUsername === currentUsername;
             const el = createMessageElement({
@@ -1021,6 +1074,7 @@
             message,
             time,
           });
+          saveConvToStorage(other, conversations[other]);
 
           if (activeChatUser === other) {
             const isMe = fromUsername === currentUsername;
@@ -1117,12 +1171,54 @@
       renderUserList();
       fetchGroups();
       if (messageInput) messageInput.focus();
-    } catch (err) {
-      if (authErrorEl) {
-        authErrorEl.textContent = "Sunucuya bağlanırken bir hata oluştu.";
+  }
+
+  authForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const username = authUsernameInput.value.trim();
+    const password = authPasswordInput.value;
+
+    if (!username || !password) {
+      if (authErrorEl) authErrorEl.textContent = "Kullanıcı adı ve şifre zorunlu.";
+      return;
+    }
+
+    try {
+      const endpoint = authMode === "login" ? "/api/login" : "/api/register";
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        if (authErrorEl) authErrorEl.textContent = data.error || "Bir hata oluştu.";
+        return;
       }
+      if (data.sessionToken) {
+        try { localStorage.setItem("rc_session", data.sessionToken); } catch {}
+      }
+      enterChat(data.username);
+    } catch (err) {
+      if (authErrorEl) authErrorEl.textContent = "Sunucuya bağlanırken bir hata oluştu.";
     }
   });
+
+  (async function tryRestoreSession() {
+    try {
+      const token = localStorage.getItem("rc_session");
+      if (!token) return;
+      const res = await fetch("/api/session?token=" + encodeURIComponent(token));
+      const data = await res.json();
+      if (res.ok && data.ok && data.username) {
+        enterChat(data.username);
+      } else {
+        localStorage.removeItem("rc_session");
+      }
+    } catch {
+      localStorage.removeItem("rc_session");
+    }
+  })();
 
   messageForm?.addEventListener("submit", (e) => {
     e.preventDefault();
