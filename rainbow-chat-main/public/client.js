@@ -911,10 +911,33 @@
       if (authErrorEl) authErrorEl.textContent = "";
 
       if (!socket) {
-        socket = io();
+        socket = io({
+          reconnection: true,
+          reconnectionAttempts: Infinity,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000,
+          timeout: 10000,
+        });
+
+        const connectionStatusEl = document.getElementById("connection-status");
+        function setConnectionStatus(text, isOk) {
+          if (!connectionStatusEl) return;
+          connectionStatusEl.textContent = text;
+          connectionStatusEl.classList.toggle("connected", isOk === true);
+          connectionStatusEl.classList.toggle("reconnecting", isOk === false);
+        }
 
         socket.on("connect", () => {
+          setConnectionStatus("Bağlandı", true);
           socket.emit("join", currentUsername);
+        });
+
+        socket.on("disconnect", (reason) => {
+          setConnectionStatus("Yeniden bağlanıyor…", false);
+        });
+
+        socket.on("connect_error", () => {
+          setConnectionStatus("Bağlantı hatası", false);
         });
 
         socket.on("systemMessage", (text) => {
