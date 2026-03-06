@@ -313,7 +313,7 @@ button:active {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 .header-actions {
