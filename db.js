@@ -51,6 +51,24 @@ function createDb({ databaseUrl }) {
         PRIMARY KEY (from_user, to_user)
       );
     `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS groups (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS group_members (
+        group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+        username TEXT NOT NULL,
+        joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (group_id, username)
+      );
+    `);
   }
 
   async function userExists(username) {
@@ -182,6 +200,65 @@ function createDb({ databaseUrl }) {
     );
   }
 
+  async function createGroup({ name, createdBy, memberUsernames }) {
+    const { rows: insertRows } = await pool.query(
+      "INSERT INTO groups (name, created_by) VALUES ($1, $2) RETURNING id",
+      [name, createdBy]
+    );
+    const groupId = insertRows[0].id;
+    const allMembers = [createdBy, ...(memberUsernames || []).filter((u) => u && u !== createdBy)];
+    for (const username of allMembers) {
+      await pool.query(
+        "INSERT INTO group_members (group_id, username) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        [groupId, username]
+      );
+    }
+    return groupId;
+  }
+
+  async function getGroupsForUser(username) {
+    const { rows } = await pool.query(
+      `
+      SELECT g.id, g.name, g.created_by, g.created_at
+      FROM groups g
+      INNER JOIN group_members gm ON gm.group_id = g.id
+      WHERE gm.username = $1
+      ORDER BY g.created_at DESC
+      `,
+      [username]
+    );
+    const withMembers = await Promise.all(
+      rows.map(async (r) => {
+        const { rows: memberRows } = await pool.query(
+          "SELECT username FROM group_members WHERE group_id = $1",
+          [r.id]
+        );
+        return { ...r, members: memberRows.map((m) => m.username) };
+      })
+    );
+    return withMembers;
+  }
+
+  async function getGroup(groupId) {
+    const { rows } = await pool.query("SELECT id, name, created_by, created_at FROM groups WHERE id = $1", [
+      groupId,
+    ]);
+    if (!rows.length) return null;
+    const { rows: memberRows } = await pool.query(
+      "SELECT username FROM group_members WHERE group_id = $1",
+      [groupId]
+    );
+    return { ...rows[0], members: memberRows.map((m) => m.username) };
+  }
+
+  async function isGroupMember(groupId, username) {
+    const { rows } = await pool.query(
+      "SELECT 1 FROM group_members WHERE group_id = $1 AND username = $2 LIMIT 1",
+      [groupId, username]
+    );
+    return rows.length > 0;
+  }
+
   return {
     init,
     pool,
@@ -197,6 +274,10 @@ function createDb({ databaseUrl }) {
     removeFriendship,
     setBlock,
     clearRequestsBetween,
+    createGroup,
+    getGroupsForUser,
+    getGroup,
+    isGroupMember,
   };
 }
 

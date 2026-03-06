@@ -1,9 +1,14 @@
 const express = require("express");
 const http = require("http");
 const path = require("path");
+const fs = require("fs");
 const bcrypt = require("bcryptjs");
 const { Server } = require("socket.io");
 const { createDb } = require("./db");
+
+const PERSISTENCE_DIR = path.join(__dirname, "data");
+const PERSISTENCE_FILE = path.join(PERSISTENCE_DIR, "persistence.json");
+let savePersistenceTimer = null;
 
 const app = express();
 const server = http.createServer(app);
@@ -42,7 +47,79 @@ const calls = new Map();
 // username -> Set<callId>
 const callsByUser = new Map();
 
+// Gruplar (DB yoksa in-memory)
+// groupId -> { id, name, createdBy, created_at?, members: string[] }
+const groups = new Map();
+// groupId -> Set<username>
+const groupMembers = new Map();
+let nextGroupId = 1;
+
 const db = createDb({ databaseUrl: process.env.DATABASE_URL });
+
+function loadPersistence() {
+  if (db) return;
+  try {
+    const raw = fs.readFileSync(PERSISTENCE_FILE, "utf8");
+    const data = JSON.parse(raw);
+    registeredUsers.clear();
+    (data.users || []).forEach((u) => {
+      registeredUsers.set(u.username, { username: u.username, passwordHash: u.passwordHash });
+    });
+    friends.clear();
+    (data.friendPairs || []).forEach(([a, b]) => {
+      ensureSet(friends, a).add(b);
+    });
+    blocks.clear();
+    (data.blocks || []).forEach(([blocker, blocked]) => {
+      ensureSet(blocks, blocker).add(blocked);
+    });
+    friendRequestsIncoming.clear();
+    friendRequestsOutgoing.clear();
+    (data.friendRequests || []).forEach(([from, to]) => {
+      ensureSet(friendRequestsIncoming, to).add(from);
+      ensureSet(friendRequestsOutgoing, from).add(to);
+    });
+    groups.clear();
+    groupMembers.clear();
+    (data.groups || []).forEach((g) => {
+      groups.set(g.id, { id: g.id, name: g.name, createdBy: g.createdBy, members: g.members || [] });
+      groupMembers.set(g.id, new Set(g.members || []));
+    });
+    nextGroupId = Math.max(1, (data.nextGroupId || 1));
+  } catch (err) {
+    if (err.code !== "ENOENT") console.error("Persistence load error:", err.message);
+  }
+}
+
+function savePersistence() {
+  if (db) return;
+  if (savePersistenceTimer) clearTimeout(savePersistenceTimer);
+  savePersistenceTimer = setTimeout(() => {
+    savePersistenceTimer = null;
+    try {
+      if (!fs.existsSync(PERSISTENCE_DIR)) fs.mkdirSync(PERSISTENCE_DIR, { recursive: true });
+      const users = Array.from(registeredUsers.values());
+      const friendPairs = [];
+      friends.forEach((set, user) => set.forEach((f) => friendPairs.push([user, f])));
+      const blocksList = [];
+      blocks.forEach((set, blocker) => set.forEach((blocked) => blocksList.push([blocker, blocked])));
+      const friendRequests = [];
+      friendRequestsOutgoing.forEach((set, from) => set.forEach((to) => friendRequests.push([from, to])));
+      const groupsList = Array.from(groups.values());
+      const payload = JSON.stringify({
+        users,
+        friendPairs,
+        blocks: blocksList,
+        friendRequests,
+        groups: groupsList,
+        nextGroupId,
+      });
+      fs.writeFileSync(PERSISTENCE_FILE, payload, "utf8");
+    } catch (err) {
+      console.error("Persistence save error:", err.message);
+    }
+  }, 300);
+}
 
 function ensureSet(map, key) {
   if (!map.has(key)) {
@@ -164,6 +241,11 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, "public")));
 
+// Favicon 404 kaldır (tarayıcı otomatik ister)
+app.get("/favicon.ico", (req, res) => {
+  res.status(204).end();
+});
+
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
@@ -204,6 +286,7 @@ app.post("/api/register", async (req, res) => {
         username: trimmedUsername,
         passwordHash,
       });
+      savePersistence();
     }
 
     return res.json({ ok: true, username: trimmedUsername });
@@ -313,6 +396,7 @@ app.post("/api/friend-request", (req, res) => {
 
   outgoingSet.add(to);
   incomingSet.add(from);
+  savePersistence();
 
   emitRelationships(from);
   emitRelationships(to);
@@ -371,6 +455,7 @@ app.post("/api/friend-respond", (req, res) => {
     ensureSet(friends, target).add(requester);
     ensureSet(friends, requester).add(target);
   }
+  savePersistence();
 
   emitRelationships(target);
   emitRelationships(requester);
@@ -448,11 +533,90 @@ app.post("/api/block", (req, res) => {
   } else {
     blockedSet.delete(other);
   }
+  savePersistence();
 
   emitRelationships(user);
   emitRelationships(other);
 
   return res.json({ ok: true });
+  })();
+});
+
+// Grup oluştur (sadece arkadaşlar eklenebilir)
+app.post("/api/groups", (req, res) => {
+  void (async () => {
+    const { username, name, members } = req.body || {};
+    const createdBy = String(username || "").trim();
+    const groupName = String(name || "").trim();
+    const memberList = Array.isArray(members) ? members.map((m) => String(m).trim()).filter(Boolean) : [];
+
+    if (!createdBy || !groupName) {
+      return res.status(400).json({ error: "Grup adı ve kullanıcı bilgisi zorunludur." });
+    }
+    if (groupName.length < 2 || groupName.length > 50) {
+      return res.status(400).json({ error: "Grup adı 2-50 karakter arasında olmalıdır." });
+    }
+
+    if (db) {
+      const myFriends = (await db.getRelationships(createdBy)).friends;
+      for (const m of memberList) {
+        if (m === createdBy) continue;
+        if (!myFriends.includes(m)) {
+          return res.status(400).json({ error: `Sadece arkadaşlarını gruba ekleyebilirsin. "${m}" arkadaş listenizde yok.` });
+        }
+      }
+      try {
+        const groupId = await db.createGroup({ name: groupName, createdBy, memberUsernames: memberList });
+        const group = await db.getGroup(groupId);
+        return res.json({ ok: true, group: { id: groupId, ...group } });
+      } catch (err) {
+        console.error("Create group error:", err);
+        return res.status(500).json({ error: "Grup oluşturulurken hata oluştu." });
+      }
+    }
+
+    const myFriends = (friends.get(createdBy) || new Set());
+    for (const m of memberList) {
+      if (m === createdBy) continue;
+      if (!myFriends.has(m)) {
+        return res.status(400).json({ error: `Sadece arkadaşlarını gruba ekleyebilirsin. "${m}" arkadaş listenizde yok.` });
+      }
+    }
+
+    const groupId = `mem-${nextGroupId++}`;
+    const allMembers = [createdBy, ...memberList.filter((m) => m !== createdBy)];
+    groups.set(groupId, { id: groupId, name: groupName, createdBy, members: allMembers });
+    groupMembers.set(groupId, new Set(allMembers));
+    savePersistence();
+    return res.json({ ok: true, group: { id: groupId, name: groupName, createdBy, members: allMembers } });
+  })();
+});
+
+// Kullanıcının gruplarını getir
+app.get("/api/groups", (req, res) => {
+  void (async () => {
+    const username = String(req.query.username || "").trim();
+    if (!username) {
+      return res.status(400).json({ error: "username gerekli." });
+    }
+
+    if (db) {
+      try {
+        const list = await db.getGroupsForUser(username);
+        return res.json({ groups: list });
+      } catch (err) {
+        console.error("Get groups error:", err);
+        return res.status(500).json({ error: "Gruplar alınırken hata oluştu." });
+      }
+    }
+
+    const list = [];
+    for (const [gid, g] of groups) {
+      if (groupMembers.get(gid).has(username)) {
+        list.push({ id: gid, name: g.name, createdBy: g.createdBy, members: [...g.members] });
+      }
+    }
+    return res.json({ groups: list });
   })();
 });
 
@@ -486,6 +650,51 @@ io.on("connection", (socket) => {
 
     broadcastUserList();
     emitRelationships(trimmedUsername);
+  });
+
+  socket.on("joinGroups", (groupIds) => {
+    const username = socket.username;
+    if (!username) return;
+    const list = Array.isArray(groupIds) ? groupIds : [];
+    void (async () => {
+      for (const gid of list) {
+        if (!gid) continue;
+        let isMember = false;
+        if (db) {
+          isMember = await db.isGroupMember(gid, username);
+        } else {
+          const members = groupMembers.get(gid);
+          isMember = members ? members.has(username) : false;
+        }
+        if (isMember) socket.join("group:" + gid);
+      }
+    })();
+  });
+
+  socket.on("groupMessage", ({ groupId, message }) => {
+    void (async () => {
+      const text = String(message || "").trim();
+      const gid = String(groupId || "").trim();
+      const fromUsername = socket.username || "";
+      if (!text || !gid || !fromUsername) return;
+
+      let isMember = false;
+      if (db) {
+        isMember = await db.isGroupMember(gid, fromUsername);
+      } else {
+        const members = groupMembers.get(gid);
+        isMember = members ? members.has(fromUsername) : false;
+      }
+      if (!isMember) return;
+
+      const payload = {
+        groupId: gid,
+        fromUsername,
+        message: text,
+        time: new Date().toISOString(),
+      };
+      io.to("group:" + gid).emit("groupMessage", payload);
+    })();
   });
 
   socket.on("privateMessage", ({ toUsername, message }) => {
@@ -668,7 +877,8 @@ async function start() {
     await db.init();
     console.log("DB aktif: kullanıcılar/arkadaşlıklar kalıcı olacak.");
   } else {
-    console.log("DB yok: kullanıcılar/arkadaşlıklar sunucu yeniden başlarsa sıfırlanır.");
+    loadPersistence();
+    console.log("DB yok: hesaplar data/persistence.json dosyasına kaydediliyor (sunucu yeniden başlasa da kalır).");
   }
 
   server.listen(PORT, () => {

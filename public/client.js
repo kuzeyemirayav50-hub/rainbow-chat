@@ -29,13 +29,24 @@
   const messageForm = document.getElementById("message-form");
   const messageInput = document.getElementById("message-input");
   const messagesContainer = document.getElementById("messages");
+  const groupListEl = document.getElementById("group-list");
+  const createGroupBtn = document.getElementById("create-group-btn");
+  const createGroupModal = document.getElementById("create-group-modal");
+  const createGroupForm = document.getElementById("create-group-form");
+  const groupNameInput = document.getElementById("group-name-input");
+  const groupMembersCheckboxes = document.getElementById("group-members-checkboxes");
+  const createGroupCancelBtn = document.getElementById("create-group-cancel-btn");
+  const panelTabs = document.querySelectorAll(".panel-tab");
 
   let socket = null;
   let currentUsername = "";
   let authMode = "login"; // "login" | "register"
   let onlineUsers = []; // string[]
   let activeChatUser = null;
+  let activeGroupId = null;
   const conversations = {}; // username -> [{ fromUsername, toUsername, message, time }]
+  const groupConversations = {}; // groupId -> [{ fromUsername, message, time }]
+  let groups = []; // { id, name, createdBy, members }[]
   let relationships = {
     friends: [],
     blocked: [],
@@ -116,7 +127,6 @@
   function renderMessagesFor(user) {
     if (!messagesContainer) return;
     messagesContainer.innerHTML = "";
-
     const history = conversations[user] || [];
     history.forEach((msg) => {
       const isMe = msg.fromUsername === currentUsername;
@@ -129,7 +139,24 @@
       });
       messagesContainer.appendChild(el);
     });
+    scrollToBottom();
+  }
 
+  function renderMessagesForGroup(groupId) {
+    if (!messagesContainer) return;
+    messagesContainer.innerHTML = "";
+    const history = groupConversations[groupId] || [];
+    history.forEach((msg) => {
+      const isMe = msg.fromUsername === currentUsername;
+      const el = createMessageElement({
+        username: msg.fromUsername,
+        message: msg.message,
+        time: msg.time,
+        type: "user",
+        isMe,
+      });
+      messagesContainer.appendChild(el);
+    });
     scrollToBottom();
   }
 
@@ -298,6 +325,7 @@
           return;
         }
 
+        activeGroupId = null;
         activeChatUser = username;
         unreadCounts[username] = 0;
 
@@ -319,11 +347,73 @@
 
         renderMessagesFor(username);
         renderUserList();
+        renderGroupList();
       });
 
       userListEl.appendChild(item);
     });
   }
+
+  function renderGroupList() {
+    if (!groupListEl) return;
+    groupListEl.innerHTML = "";
+    if (!groups.length) {
+      const empty = document.createElement("div");
+      empty.className = "hint";
+      empty.textContent = "Henüz grubun yok. \"Yeni Grup\" ile sadece arkadaşlarınla grup oluşturabilirsin.";
+      groupListEl.appendChild(empty);
+      return;
+    }
+    groups.forEach((g) => {
+      const item = document.createElement("div");
+      item.className = "user-item group-item";
+      if (activeGroupId === g.id) item.classList.add("active");
+      const main = document.createElement("div");
+      main.className = "user-main";
+      const dot = document.createElement("span");
+      dot.className = "user-dot";
+      const name = document.createElement("span");
+      name.className = "user-name";
+      name.textContent = g.name;
+      main.appendChild(dot);
+      main.appendChild(name);
+      const sub = document.createElement("div");
+      sub.className = "group-members-preview";
+      sub.textContent = (g.members || []).slice(0, 3).join(", ") + ((g.members || []).length > 3 ? "…" : "");
+      item.appendChild(main);
+      item.appendChild(sub);
+      item.addEventListener("click", () => {
+        activeGroupId = g.id;
+        activeChatUser = null;
+        if (chatTitleEl && chatSubtitleEl) {
+          chatTitleEl.textContent = g.name;
+          chatSubtitleEl.textContent = "Grup sohbeti • " + (g.members || []).join(", ");
+        }
+        if (messageInput) messageInput.placeholder = g.name + " grubuna mesaj yaz...";
+        callAudioBtn.disabled = true;
+        callVideoBtn.disabled = true;
+        renderMessagesForGroup(g.id);
+        renderUserList();
+        renderGroupList();
+      });
+      groupListEl.appendChild(item);
+    });
+  }
+
+  function switchPanel(panel) {
+    panelTabs.forEach((t) => {
+      t.classList.toggle("active", t.getAttribute("data-panel") === panel);
+    });
+    if (userListEl) userListEl.classList.toggle("hidden", panel !== "chats");
+    if (groupListEl) groupListEl.classList.toggle("hidden", panel !== "groups");
+    if (createGroupBtn) createGroupBtn.classList.toggle("hidden", panel !== "groups");
+  }
+
+  panelTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      switchPanel(tab.getAttribute("data-panel"));
+    });
+  });
 
   function maybeShowNotification(fromUsername, message) {
     if (!notificationsEnabled) return;
@@ -594,19 +684,145 @@
   incomingAcceptBtn?.addEventListener("click", () => acceptIncomingCall());
   incomingRejectBtn?.addEventListener("click", () => rejectIncomingCall());
 
+  const addFriendUsernameInput = document.getElementById("add-friend-username");
+  const addFriendBtn = document.getElementById("add-friend-btn");
+  const addFriendHintEl = document.getElementById("add-friend-hint");
+
   async function sendFriendRequest(targetUsername) {
+    const hint = addFriendHintEl;
+    if (hint) hint.textContent = "";
     try {
-      await fetch("/api/friend-request", {
+      const res = await fetch("/api/friend-request", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ username: currentUsername, target: targetUsername }),
       });
+      const data = await res.json();
+      if (hint) {
+        if (res.ok && data.ok) {
+          hint.textContent = "Arkadaşlık isteği gönderildi.";
+          hint.style.color = "#86efac";
+        } else {
+          hint.textContent = data.error || "İstek gönderilemedi.";
+          hint.style.color = "#fca5a5";
+        }
+      }
     } catch {
-      // Sessizce geç
+      if (hint) {
+        hint.textContent = "Sunucuya bağlanılamadı.";
+        hint.style.color = "#fca5a5";
+      }
     }
   }
+
+  function addFriendByUsername() {
+    const input = addFriendUsernameInput;
+    if (!input) return;
+    const target = String(input.value || "").trim();
+    if (target.length < 3) {
+      if (addFriendHintEl) {
+        addFriendHintEl.textContent = "Kullanıcı adı en az 3 karakter olmalı.";
+        addFriendHintEl.style.color = "#fca5a5";
+      }
+      return;
+    }
+    if (target === currentUsername) {
+      if (addFriendHintEl) {
+        addFriendHintEl.textContent = "Kendine istek gönderemezsin.";
+        addFriendHintEl.style.color = "#fca5a5";
+      }
+      return;
+    }
+    sendFriendRequest(target);
+    input.value = "";
+  }
+
+  addFriendBtn?.addEventListener("click", addFriendByUsername);
+  addFriendUsernameInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addFriendByUsername();
+  });
+
+  async function fetchGroups() {
+    try {
+      const res = await fetch("/api/groups?username=" + encodeURIComponent(currentUsername));
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.groups)) {
+        groups = data.groups;
+        if (socket) socket.emit("joinGroups", groups.map((g) => g.id));
+        renderGroupList();
+      }
+    } catch {}
+  }
+
+  function openCreateGroupModal() {
+    if (!createGroupModal || !groupMembersCheckboxes) return;
+    groupNameInput.value = "";
+    groupMembersCheckboxes.innerHTML = "";
+    (relationships.friends || []).forEach((friendUsername) => {
+      const label = document.createElement("label");
+      label.className = "checkbox-label";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = friendUsername;
+      input.name = "groupMember";
+      label.appendChild(input);
+      label.appendChild(document.createTextNode(" " + friendUsername));
+      groupMembersCheckboxes.appendChild(label);
+    });
+    if (!relationships.friends || !relationships.friends.length) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.textContent = "Önce arkadaş ekle; sadece arkadaşlarını gruba davet edebilirsin.";
+      groupMembersCheckboxes.appendChild(p);
+    }
+    createGroupModal.classList.remove("hidden");
+  }
+
+  function closeCreateGroupModal() {
+    if (createGroupModal) createGroupModal.classList.add("hidden");
+  }
+
+  createGroupBtn?.addEventListener("click", openCreateGroupModal);
+  createGroupCancelBtn?.addEventListener("click", closeCreateGroupModal);
+  createGroupModal?.addEventListener("click", (e) => {
+    if (e.target === createGroupModal) closeCreateGroupModal();
+  });
+
+  createGroupForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = (groupNameInput && groupNameInput.value || "").trim();
+    if (name.length < 2 || name.length > 50) return;
+    const checked = groupMembersCheckboxes
+      ? Array.from(groupMembersCheckboxes.querySelectorAll('input[name="groupMember"]:checked')).map((i) => i.value)
+      : [];
+    try {
+      const res = await fetch("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: currentUsername, name, members: checked }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok && data.group) {
+        groups.unshift(data.group);
+        if (socket) socket.emit("joinGroups", groups.map((g) => g.id));
+        renderGroupList();
+        closeCreateGroupModal();
+        groupNameInput.value = "";
+      } else {
+        if (addFriendHintEl) {
+          addFriendHintEl.textContent = data.error || "Grup oluşturulamadı.";
+          addFriendHintEl.style.color = "#fca5a5";
+        }
+      }
+    } catch {
+      if (addFriendHintEl) {
+        addFriendHintEl.textContent = "Sunucuya bağlanılamadı.";
+        addFriendHintEl.style.color = "#fca5a5";
+      }
+    }
+  });
 
   async function respondFriend(fromUser, accept) {
     try {
@@ -695,10 +911,33 @@
       if (authErrorEl) authErrorEl.textContent = "";
 
       if (!socket) {
-        socket = io();
+        socket = io({
+          reconnection: true,
+          reconnectionAttempts: Infinity,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000,
+          timeout: 10000,
+        });
+
+        const connectionStatusEl = document.getElementById("connection-status");
+        function setConnectionStatus(text, isOk) {
+          if (!connectionStatusEl) return;
+          connectionStatusEl.textContent = text;
+          connectionStatusEl.classList.toggle("connected", isOk === true);
+          connectionStatusEl.classList.toggle("reconnecting", isOk === false);
+        }
 
         socket.on("connect", () => {
+          setConnectionStatus("Bağlandı", true);
           socket.emit("join", currentUsername);
+        });
+
+        socket.on("disconnect", (reason) => {
+          setConnectionStatus("Yeniden bağlanıyor…", false);
+        });
+
+        socket.on("connect_error", () => {
+          setConnectionStatus("Bağlantı hatası", false);
         });
 
         socket.on("systemMessage", (text) => {
@@ -744,6 +983,27 @@
           }
 
           renderUserList();
+          renderGroupList();
+        });
+
+        socket.on("groupMessage", (payload) => {
+          const { groupId, fromUsername, message, time } = payload;
+          if (!groupId) return;
+          if (!groupConversations[groupId]) groupConversations[groupId] = [];
+          groupConversations[groupId].push({ fromUsername, message, time });
+          if (activeGroupId === groupId) {
+            const isMe = fromUsername === currentUsername;
+            const el = createMessageElement({
+              username: fromUsername,
+              message,
+              time,
+              type: "user",
+              isMe,
+            });
+            messagesContainer.appendChild(el);
+            scrollToBottom();
+          }
+          renderGroupList();
         });
 
         socket.on("privateMessage", (payload) => {
@@ -855,6 +1115,7 @@
       chatSection.classList.remove("hidden");
       setupNotificationPermission();
       renderUserList();
+      fetchGroups();
       if (messageInput) messageInput.focus();
     } catch (err) {
       if (authErrorEl) {
@@ -869,8 +1130,14 @@
 
     const msg = messageInput.value.trim();
     if (!msg) return;
-    if (!activeChatUser) return;
-    if (!isFriend(activeChatUser)) return;
+
+    if (activeGroupId) {
+      socket.emit("groupMessage", { groupId: activeGroupId, message: msg });
+      messageInput.value = "";
+      return;
+    }
+
+    if (!activeChatUser || !isFriend(activeChatUser)) return;
 
     socket.emit("privateMessage", {
       toUsername: activeChatUser,

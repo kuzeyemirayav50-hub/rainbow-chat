@@ -196,8 +196,79 @@ input[type="password"]:focus {
   padding-right: 12px;
 }
 
-.user-list {
-  max-height: 340px;
+.add-friend-by-username {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.add-friend-by-username input {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.6);
+  color: var(--text-main);
+  font-size: 14px;
+}
+
+.add-friend-by-username input::placeholder {
+  color: var(--text-muted);
+}
+
+.add-friend-by-username button {
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(34, 197, 94, 0.6);
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.add-friend-by-username button:hover {
+  background: rgba(34, 197, 94, 0.35);
+}
+
+.add-friend-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  min-height: 1.2em;
+}
+
+.panel-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.panel-tab {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.5);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.panel-tab:hover {
+  color: var(--text-main);
+  background: rgba(30, 64, 175, 0.2);
+}
+
+.panel-tab.active {
+  background: rgba(99, 102, 241, 0.35);
+  color: #c7d2fe;
+  border-color: rgba(99, 102, 241, 0.6);
+}
+
+.user-list,
+.group-list {
+  max-height: 280px;
   overflow-y: auto;
   padding-right: 4px;
   display: flex;
@@ -209,9 +280,83 @@ input[type="password"]:focus {
   width: 4px;
 }
 
-.user-list::-webkit-scrollbar-thumb {
+.user-list::-webkit-scrollbar-thumb,
+.group-list::-webkit-scrollbar-thumb {
   background: rgba(148, 163, 184, 0.7);
   border-radius: 999px;
+}
+
+.group-list.hidden,
+.user-list.hidden {
+  display: none;
+}
+
+.group-item .group-members-preview {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.create-group-btn {
+  margin-top: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.6);
+  background: rgba(99, 102, 241, 0.2);
+  color: #c7d2fe;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.create-group-btn:hover {
+  background: rgba(99, 102, 241, 0.35);
+}
+
+.create-group-btn.hidden {
+  display: none;
+}
+
+.group-members-label {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.group-members-checkboxes {
+  max-height: 180px;
+  overflow-y: auto;
+  margin-bottom: 14px;
+  padding: 8px 0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.checkbox-label input {
+  width: 18px;
+  height: 18px;
+}
+
+#create-group-modal .modal-card form input[type="text"] {
+  width: 100%;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.6);
+  color: var(--text-main);
+  font-size: 14px;
 }
 
 .user-item {
@@ -336,6 +481,25 @@ button:active {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.connection-status {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.connection-status.connected {
+  color: #86efac;
+  border-color: rgba(34, 197, 94, 0.5);
+  background: rgba(34, 197, 94, 0.15);
+}
+
+.connection-status.reconnecting {
+  color: #fcd34d;
+  border-color: rgba(250, 204, 21, 0.5);
+  background: rgba(250, 204, 21, 0.15);
 }
 
 .call-actions {

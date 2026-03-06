@@ -67,11 +67,28 @@
       <section class="chat-section hidden" id="chat-section">
         <div class="chat-layout">
           <aside class="user-panel">
-            <h2>Çevrimiçi Kullanıcılar</h2>
+            <h2>Çevrimiçi &amp; Arkadaşlar</h2>
             <p class="subtitle">
-              Bir kullanıcı seç ve yalnızca onunla özel sohbet başlat.
+              Kullanıcı adı ile arkadaş ekle veya listeden biriyle sohbet başlat.
             </p>
+            <div class="add-friend-by-username">
+              <input
+                type="text"
+                id="add-friend-username"
+                maxlength="24"
+                placeholder="Kullanıcı adı (örn: oslun_yasin)"
+                autocomplete="off"
+              />
+              <button type="button" id="add-friend-btn">Arkadaş Ekle</button>
+            </div>
+            <p class="add-friend-hint" id="add-friend-hint"></p>
+            <div class="panel-tabs">
+              <button type="button" class="panel-tab active" data-panel="chats">Sohbetler</button>
+              <button type="button" class="panel-tab" data-panel="groups">Gruplar</button>
+            </div>
             <div class="user-list" id="user-list"></div>
+            <div class="group-list hidden" id="group-list"></div>
+            <button type="button" class="create-group-btn hidden" id="create-group-btn">+ Yeni Grup</button>
           </aside>
 
           <div class="chat-main">
@@ -84,6 +101,7 @@
                 </p>
               </div>
               <div class="header-actions">
+                <div class="connection-status" id="connection-status" title="Socket bağlantı durumu">Bağlandı</div>
                 <div class="call-actions">
                   <button type="button" class="call-btn" id="call-audio-btn" disabled>
                     Sesli Ara
@@ -136,6 +154,22 @@
           </div>
         </div>
       </section>
+
+      <div class="modal hidden" id="create-group-modal">
+        <div class="modal-card">
+          <div class="modal-title">Yeni Grup Oluştur</div>
+          <p class="subtitle">Sadece arkadaşlarını ekleyebilirsin. Grup adı ve en az bir arkadaş seç.</p>
+          <form id="create-group-form">
+            <input type="text" id="group-name-input" maxlength="50" placeholder="Grup adı (2-50 karakter)" required />
+            <div class="group-members-label">Arkadaşlarını seç:</div>
+            <div class="group-members-checkboxes" id="group-members-checkboxes"></div>
+            <div class="modal-actions">
+              <button type="button" class="call-btn" id="create-group-cancel-btn">İptal</button>
+              <button type="submit" class="call-btn" id="create-group-submit-btn">Oluştur</button>
+            </div>
+          </form>
+        </div>
+      </div>
 
       <div class="modal hidden" id="incoming-call-modal">
         <div class="modal-card">
