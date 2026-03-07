@@ -829,6 +829,15 @@
       userSearchResultsEl.classList.add("hidden");
       return;
     }
+    try {
+      const res = await fetch("/api/users/search?q=" + encodeURIComponent(q) + "&exclude=" + encodeURIComponent(currentUsername));
+      const data = await res.json();
+      const list = Array.isArray(data.users) ? data.users : [];
+      userSearchResultsEl.innerHTML = "";
+      if (!list.length) {
+        userSearchResultsEl.classList.add("hidden");
+        return;
+      }
       list.forEach((username) => {
         const status = relationships.friends.includes(username)
           ? "Arkadaş"
