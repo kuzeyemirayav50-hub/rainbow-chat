@@ -1,0 +1,23 @@
+# Render deployment configuration for Rainbow Chat
+# https://render.com/docs/render-yaml
+
+services:
+  - type: web
+    name: rainbow-chat
+    env: node
+    region: oregon
+    plan: starter
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_SSL
+        value: true
+      # DATABASE_URL will be injected automatically when the database is linked.
+
+databases:
+  - name: rainbow-chat-db
+    plan: starter
+    # The DATABASE_URL secret is automatically provided to services that are linked to this database.

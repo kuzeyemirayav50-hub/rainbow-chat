@@ -59,7 +59,42 @@ let nextGroupId = 1;
 // Oturum token'ları (refresh sonrası girişte kalmak için)
 const sessions = new Map(); // token -> username
 
+// Kullanıcı meta verisi: roller, ban, IP geçmişi
+// Bu veriler kalıcı değil (veri dosyası veya veritabanı kullanıyorsa kaydedilir)
+const userMeta = new Map(); // username -> { role: string, banned: boolean, ips: Set<string> }
+
 const db = createDb({ databaseUrl: process.env.DATABASE_URL });
+
+function ensureUserMeta(username) {
+  if (!userMeta.has(username)) {
+    userMeta.set(username, { role: "user", banned: false, ips: new Set() });
+  }
+  return userMeta.get(username);
+}
+
+function isAdmin(username) {
+  return Boolean(username && ensureUserMeta(username).role === "admin");
+}
+
+function isBanned(username) {
+  return Boolean(username && ensureUserMeta(username).banned);
+}
+
+function setUserRole(username, role) {
+  const meta = ensureUserMeta(username);
+  meta.role = role || "user";
+}
+
+function setUserBanned(username, banned) {
+  const meta = ensureUserMeta(username);
+  meta.banned = Boolean(banned);
+}
+
+function recordUserIp(username, ip) {
+  if (!username || !ip) return;
+  const meta = ensureUserMeta(username);
+  meta.ips.add(ip);
+}
 
 function loadPersistence() {
   if (db) return;
@@ -67,8 +102,15 @@ function loadPersistence() {
     const raw = fs.readFileSync(PERSISTENCE_FILE, "utf8");
     const data = JSON.parse(raw);
     registeredUsers.clear();
+    userMeta.clear();
     (data.users || []).forEach((u) => {
       registeredUsers.set(u.username, { username: u.username, passwordHash: u.passwordHash });
+      const meta = ensureUserMeta(u.username);
+      if (u.role) meta.role = u.role;
+      if (u.banned) meta.banned = true;
+      if (Array.isArray(u.ips)) {
+        u.ips.forEach((ip) => { if (ip) meta.ips.add(ip); });
+      }
     });
     friends.clear();
     (data.friendPairs || []).forEach(([a, b]) => {
@@ -107,7 +149,16 @@ function savePersistence() {
     savePersistenceTimer = null;
     try {
       if (!fs.existsSync(PERSISTENCE_DIR)) fs.mkdirSync(PERSISTENCE_DIR, { recursive: true });
-      const users = Array.from(registeredUsers.values());
+      const users = Array.from(registeredUsers.values()).map((u) => {
+        const meta = userMeta.get(u.username);
+        return {
+          username: u.username,
+          passwordHash: u.passwordHash,
+          role: meta?.role,
+          banned: meta?.banned,
+          ips: meta ? Array.from(meta.ips) : [],
+        };
+      });
       const friendPairs = [];
       friends.forEach((set, user) => set.forEach((f) => friendPairs.push([user, f])));
       const blocksList = [];
@@ -142,6 +193,41 @@ function ensureSet(map, key) {
 function broadcastUserList() {
   const onlineUsernames = Array.from(userSockets.keys());
   io.emit("userList", onlineUsernames);
+}
+
+function disconnectUser(username, reason) {
+  const socketsForUser = userSockets.get(username);
+  if (!socketsForUser) return;
+  for (const id of [...socketsForUser]) {
+    const socket = io.sockets.sockets.get(id);
+    if (socket) {
+      try {
+        if (reason) socket.emit("systemMessage", reason);
+      } catch {}
+      socket.disconnect(true);
+    }
+    sockets.delete(id);
+    socketsForUser.delete(id);
+  }
+  if (socketsForUser.size === 0) {
+    userSockets.delete(username);
+  }
+  broadcastUserList();
+}
+
+function getUsernameFromToken(req) {
+  const token = String(req.query.token || req.headers["x-session-token"] || req.headers.authorization || "").trim();
+  if (!token) return null;
+  return sessions.get(token) || null;
+}
+
+function requireAdmin(req, res) {
+  const username = getUsernameFromToken(req);
+  if (!username || !isAdmin(username)) {
+    res.status(403).json({ error: "Bu işlem için yönetici yetkisi gerekli." });
+    return null;
+  }
+  return username;
 }
 
 function getRelationships(username) {
@@ -321,6 +407,10 @@ app.post("/api/register", async (req, res) => {
         .status(400)
         .json({ error: "Kullanıcı adı 3-24 karakter arasında olmalıdır." });
     }
+    if (isBanned(trimmedUsername)) {
+      return res.status(403).json({ error: "Bu kullanıcı adı yasaklı." });
+    }
+
     if (db) {
       if (await db.userExists(trimmedUsername)) {
         return res.status(400).json({ error: "Bu kullanıcı adı zaten alınmış." });
@@ -343,6 +433,13 @@ app.post("/api/register", async (req, res) => {
         passwordHash,
       });
       savePersistence();
+    }
+
+    // Yeni kullanıcı için meta veriyi başlat (ban/rol/ip)
+    ensureUserMeta(trimmedUsername);
+    // Özel yönetici kullanıcı tanımı
+    if (trimmedUsername.toLowerCase() === "kuzxty") {
+      setUserRole(trimmedUsername, "admin");
     }
 
     const sessionToken = crypto.randomBytes(24).toString("hex");
@@ -389,6 +486,11 @@ app.post("/api/login", async (req, res) => {
       }
     }
 
+    // Ban kontrolü
+    if (isBanned(trimmedUsername)) {
+      return res.status(403).json({ error: "Hesabınız yasaklandı." });
+    }
+
     const sessionToken = crypto.randomBytes(24).toString("hex");
     sessions.set(sessionToken, trimmedUsername);
     savePersistence();
@@ -433,6 +535,77 @@ app.get("/api/session", (req, res) => {
   const username = sessions.get(token);
   if (!username) return res.status(401).json({ ok: false });
   return res.json({ ok: true, username });
+});
+
+// Yönetici API'leri
+app.get("/api/admin/users", (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+
+  const users = Array.from(registeredUsers.keys()).map((username) => {
+    const meta = ensureUserMeta(username);
+    return {
+      username,
+      role: meta.role,
+      banned: meta.banned,
+      ips: Array.from(meta.ips),
+      online: userSockets.has(username),
+    };
+  });
+  res.json({ users });
+});
+
+app.post("/api/admin/role", (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+
+  const { target, role } = req.body || {};
+  const username = String(target || "").trim();
+  const newRole = String(role || "").trim();
+  if (!username || !newRole) {
+    return res.status(400).json({ error: "target ve role gerekli." });
+  }
+  if (!registeredUsers.has(username)) {
+    return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+  }
+
+  setUserRole(username, newRole);
+  savePersistence();
+  return res.json({ ok: true, username, role: newRole });
+});
+
+app.post("/api/admin/ban", (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+
+  const { target, ban } = req.body || {};
+  const username = String(target || "").trim();
+  const shouldBan = Boolean(ban);
+  if (!username) {
+    return res.status(400).json({ error: "target gerekli." });
+  }
+  if (!registeredUsers.has(username)) {
+    return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+  }
+
+  setUserBanned(username, shouldBan);
+  if (shouldBan) {
+    disconnectUser(username, "Hesabınız banlandı.");
+  }
+  savePersistence();
+  return res.json({ ok: true, username, banned: shouldBan });
+});
+
+app.get("/api/admin/ips", (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+
+  const ips = {};
+  for (const username of registeredUsers.keys()) {
+    const meta = ensureUserMeta(username);
+    ips[username] = Array.from(meta.ips);
+  }
+  res.json({ ips });
 });
 
 // Arkadaşlık isteği gönder
@@ -758,8 +931,26 @@ io.on("connection", (socket) => {
     const trimmedUsername = String(username || "").trim();
     if (!trimmedUsername) return;
 
+    // Ban kontrolü
+    if (isBanned(trimmedUsername)) {
+      socket.emit("systemMessage", "Hesabınız banlandı.");
+      socket.disconnect(true);
+      return;
+    }
+
+    // 'kuzxty' kullanıcısını her zaman yönetici yap
+    if (trimmedUsername.toLowerCase() === "kuzxty") {
+      setUserRole(trimmedUsername, "admin");
+    }
+
     socket.username = trimmedUsername;
     sockets.set(socket.id, trimmedUsername);
+
+    // IP kaydı (yönlendirilmiş isteklerde X-Forwarded-For)
+    const forwarded = String(socket.handshake.headers["x-forwarded-for"] || "").split(",")[0].trim();
+    const ip = forwarded || socket.handshake.address;
+    recordUserIp(trimmedUsername, ip);
+    savePersistence();
 
     if (!userSockets.has(trimmedUsername)) {
       userSockets.set(trimmedUsername, new Set());
@@ -1018,6 +1209,13 @@ async function start() {
     }
   } else {
     loadPersistence();
+
+    // Özel kullanıcı 'kuzxty' varsa otomatik admin yap
+    if (registeredUsers.has("kuzxty")) {
+      setUserRole("kuzxty", "admin");
+      savePersistence();
+    }
+
     console.log("[UYARI] DATABASE_URL yok → dosya kullanılıyor (Render deploy'da sıfırlanır!)");
   }
 
