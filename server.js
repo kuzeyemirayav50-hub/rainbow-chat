@@ -215,14 +215,15 @@ function disconnectUser(username, reason) {
   broadcastUserList();
 }
 
-function getUsernameFromToken(req) {
+async function getUsernameFromToken(req) {
   const token = String(req.query.token || req.headers["x-session-token"] || req.headers.authorization || "").trim();
   if (!token) return null;
+  if (db) return await db.getSessionByToken(token);
   return sessions.get(token) || null;
 }
 
-function requireAdmin(req, res) {
-  const username = getUsernameFromToken(req);
+async function requireAdmin(req, res) {
+  const username = await getUsernameFromToken(req);
   if (!username || !isAdmin(username)) {
     res.status(403).json({ error: "Bu işlem için yönetici yetkisi gerekli." });
     return null;
@@ -481,8 +482,12 @@ app.post("/api/register", async (req, res) => {
     }
 
     const sessionToken = crypto.randomBytes(24).toString("hex");
-    sessions.set(sessionToken, trimmedUsername);
-    savePersistence();
+    if (db) {
+      await db.createSession(sessionToken, trimmedUsername);
+    } else {
+      sessions.set(sessionToken, trimmedUsername);
+      savePersistence();
+    }
     const storage = db ? "veritabanı (PostgreSQL)" : "dosya (persistence.json)";
     console.log(`[KAYIT] ${trimmedUsername} oluşturuldu → ${storage} (silinmeyecek)`);
     return res.json({ ok: true, username: trimmedUsername, sessionToken });
@@ -530,8 +535,12 @@ app.post("/api/login", async (req, res) => {
     }
 
     const sessionToken = crypto.randomBytes(24).toString("hex");
-    sessions.set(sessionToken, trimmedUsername);
-    savePersistence();
+    if (db) {
+      await db.createSession(sessionToken, trimmedUsername);
+    } else {
+      sessions.set(sessionToken, trimmedUsername);
+      savePersistence();
+    }
     const storage = db ? "veritabanı" : "dosya";
     console.log(`[GİRİŞ] ${trimmedUsername} başarılı → ${storage} doğrulandı (hesap silinmemiş)`);
     return res.json({ ok: true, username: trimmedUsername, sessionToken });
@@ -568,34 +577,47 @@ app.get("/api/users/search", (req, res) => {
 });
 
 app.get("/api/session", (req, res) => {
-  const token = String(req.query.token || "").trim();
-  if (!token) return res.status(401).json({ ok: false });
-  const username = sessions.get(token);
-  if (!username) return res.status(401).json({ ok: false });
-  return res.json({ ok: true, username });
+  void (async () => {
+    try {
+      const token = String(req.query.token || "").trim();
+      if (!token) return res.status(401).json({ ok: false });
+      let username = null;
+      if (db) {
+        username = await db.getSessionByToken(token);
+      } else {
+        username = sessions.get(token);
+      }
+      if (!username) return res.status(401).json({ ok: false });
+      return res.json({ ok: true, username });
+    } catch (err) {
+      return res.status(500).json({ ok: false });
+    }
+  })();
 });
 
 // Yönetici API'leri
 app.get("/api/admin/users", (req, res) => {
-  const admin = requireAdmin(req, res);
-  if (!admin) return;
-
-  const users = Array.from(registeredUsers.keys()).map((username) => {
-    const meta = ensureUserMeta(username);
-    return {
-      username,
-      role: meta.role,
-      banned: meta.banned,
-      ips: Array.from(meta.ips),
-      online: userSockets.has(username),
-    };
-  });
-  res.json({ users });
+  void (async () => {
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
+    const users = Array.from(registeredUsers.keys()).map((username) => {
+      const meta = ensureUserMeta(username);
+      return {
+        username,
+        role: meta.role,
+        banned: meta.banned,
+        ips: Array.from(meta.ips),
+        online: userSockets.has(username),
+      };
+    });
+    res.json({ users });
+  })();
 });
 
 app.post("/api/admin/role", (req, res) => {
-  const admin = requireAdmin(req, res);
-  if (!admin) return;
+  void (async () => {
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
 
   const { target, role } = req.body || {};
   const username = String(target || "").trim();
@@ -607,14 +629,16 @@ app.post("/api/admin/role", (req, res) => {
     return res.status(404).json({ error: "Kullanıcı bulunamadı." });
   }
 
-  setUserRole(username, newRole);
-  savePersistence();
-  return res.json({ ok: true, username, role: newRole });
+    setUserRole(username, newRole);
+    savePersistence();
+    return res.json({ ok: true, username, role: newRole });
+  })();
 });
 
 app.post("/api/admin/ban", (req, res) => {
-  const admin = requireAdmin(req, res);
-  if (!admin) return;
+  void (async () => {
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
 
   const { target, ban } = req.body || {};
   const username = String(target || "").trim();
@@ -626,24 +650,26 @@ app.post("/api/admin/ban", (req, res) => {
     return res.status(404).json({ error: "Kullanıcı bulunamadı." });
   }
 
-  setUserBanned(username, shouldBan);
-  if (shouldBan) {
-    disconnectUser(username, "Hesabınız banlandı.");
-  }
-  savePersistence();
-  return res.json({ ok: true, username, banned: shouldBan });
+    setUserBanned(username, shouldBan);
+    if (shouldBan) {
+      disconnectUser(username, "Hesabınız banlandı.");
+    }
+    savePersistence();
+    return res.json({ ok: true, username, banned: shouldBan });
+  })();
 });
 
 app.get("/api/admin/ips", (req, res) => {
-  const admin = requireAdmin(req, res);
-  if (!admin) return;
-
-  const ips = {};
-  for (const username of registeredUsers.keys()) {
-    const meta = ensureUserMeta(username);
-    ips[username] = Array.from(meta.ips);
-  }
-  res.json({ ips });
+  void (async () => {
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
+    const ips = {};
+    for (const username of registeredUsers.keys()) {
+      const meta = ensureUserMeta(username);
+      ips[username] = Array.from(meta.ips);
+    }
+    res.json({ ips });
+  })();
 });
 
 // Arkadaşlık isteği gönder

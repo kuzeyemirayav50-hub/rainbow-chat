@@ -74,6 +74,14 @@ function createDb({ databaseUrl }) {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS messages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         conv_type TEXT NOT NULL,
@@ -88,6 +96,22 @@ function createDb({ databaseUrl }) {
         reactions JSONB NOT NULL DEFAULT '{}'
       );
     `);
+  }
+
+  async function createSession(token, username) {
+    await pool.query(
+      "INSERT INTO sessions (token, username) VALUES ($1, $2) ON CONFLICT (token) DO UPDATE SET username = $2, created_at = NOW()",
+      [token, username]
+    );
+  }
+
+  async function getSessionByToken(token) {
+    const { rows } = await pool.query("SELECT username FROM sessions WHERE token = $1", [token]);
+    return rows[0]?.username || null;
+  }
+
+  async function deleteSession(token) {
+    await pool.query("DELETE FROM sessions WHERE token = $1", [token]);
   }
 
   async function updateLastSeen(username) {
@@ -381,6 +405,9 @@ function createDb({ databaseUrl }) {
   return {
     init,
     pool,
+    createSession,
+    getSessionByToken,
+    deleteSession,
     updateLastSeen,
     getLastSeen,
     insertMessage,

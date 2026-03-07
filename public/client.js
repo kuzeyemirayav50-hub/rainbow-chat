@@ -60,6 +60,12 @@
     if (lastUser && authUsernameInput) authUsernameInput.value = lastUser;
   } catch {}
 
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".msg-action-dropdown-wrap")) {
+      document.querySelectorAll(".msg-action-dropdown.open").forEach((d) => d.classList.remove("open"));
+    }
+  });
+
   let socket = null;
   let currentUsername = "";
   let authMode = "login"; // "login" | "register"
@@ -340,7 +346,9 @@
       conversations[user] = loadConvFromStorage(user);
     }
     messagesContainer.innerHTML = "";
-    let history = conversations[user] || [];
+    const convId = [currentUsername, user].sort().join("_");
+    const deletedForMe = loadDeletedForMePm(convId);
+    let history = (conversations[user] || []).filter((m) => !m.id || !deletedForMe.has(m.id));
     const q = String(searchQuery || "").trim().toLowerCase();
     if (q) history = history.filter((m) => {
       const msg = String(m.message || "");
@@ -368,11 +376,42 @@
     scrollToBottom();
   }
 
+  function loadDeletedForMePm(convId) {
+    try {
+      const raw = localStorage.getItem("rc_deleted_me_pm_" + convId);
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch { return new Set(); }
+  }
+  function saveDeletedForMePm(convId, set) {
+    try {
+      localStorage.setItem("rc_deleted_me_pm_" + convId, JSON.stringify([...set]));
+    } catch {}
+  }
+  function loadDeletedForMeGroup(groupId) {
+    try {
+      const raw = localStorage.getItem("rc_deleted_me_grp_" + groupId);
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch { return new Set(); }
+  }
+  function saveDeletedForMeGroup(groupId, set) {
+    try {
+      localStorage.setItem("rc_deleted_me_grp_" + groupId, JSON.stringify([...set]));
+    } catch {}
+  }
+
   function addMessageActions(rowEl, msg) {
     if (!msg || msg.type === "system" || msg.deleted) return;
     const id = msg.id;
     if (!id) return;
     const isMe = msg.fromUsername === currentUsername;
+    const bubble = rowEl.querySelector(".message-bubble");
+    if (bubble && msg.message && !String(msg.message).startsWith("data:image/")) {
+      bubble.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        navigator.clipboard.writeText(msg.message).then(() => showToast("Mesaj kopyalandı")).catch(() => {});
+      });
+      bubble.title = "Sağ tık: Kopyala";
+    }
     const actions = document.createElement("div");
     actions.className = "message-actions";
     const reactBtn = document.createElement("button");
@@ -390,15 +429,46 @@
     react2.onclick = () => socket?.emit("message:react", { id, emoji: "❤️" });
     actions.appendChild(react2);
     if (isMe) {
+      const delWrap = document.createElement("div");
+      delWrap.className = "msg-action-dropdown-wrap";
       const delBtn = document.createElement("button");
       delBtn.type = "button";
       delBtn.className = "msg-action-btn danger";
-      delBtn.textContent = "Sil";
+      delBtn.textContent = "Sil ▼";
+      delBtn.title = "Silme seçenekleri";
+      const dropdown = document.createElement("div");
+      dropdown.className = "msg-action-dropdown";
+      dropdown.innerHTML = '<button type="button" class="msg-dropdown-item" data-action="forme">Benim için sil</button><button type="button" class="msg-dropdown-item danger" data-action="everyone">Herkes için sil</button>';
+      dropdown.addEventListener("click", (e) => e.stopPropagation());
       delBtn.addEventListener("click", (e) => {
         e.stopPropagation();
+        dropdown.classList.toggle("open");
+      });
+      dropdown.querySelector('[data-action="forme"]').addEventListener("click", (e) => {
+        e.stopPropagation();
+        dropdown.classList.remove("open");
+        const convId = activeChatUser ? [currentUsername, activeChatUser].sort().join("_") : null;
+        const gid = activeGroupId;
+        if (convId) {
+          const set = loadDeletedForMePm(convId);
+          set.add(id);
+          saveDeletedForMePm(convId, set);
+          if (activeChatUser) renderMessagesFor(activeChatUser, messageSearchQuery);
+        } else if (gid) {
+          const set = loadDeletedForMeGroup(gid);
+          set.add(id);
+          saveDeletedForMeGroup(gid, set);
+          renderMessagesForGroup(gid, messageSearchQuery);
+        }
+      });
+      dropdown.querySelector('[data-action="everyone"]').addEventListener("click", (e) => {
+        e.stopPropagation();
+        dropdown.classList.remove("open");
         if (socket) socket.emit("message:delete", { id });
       });
-      actions.appendChild(delBtn);
+      delWrap.appendChild(delBtn);
+      delWrap.appendChild(dropdown);
+      actions.appendChild(delWrap);
       const editBtn = document.createElement("button");
       editBtn.type = "button";
       editBtn.className = "msg-action-btn";
@@ -410,6 +480,16 @@
       });
       actions.appendChild(editBtn);
     }
+    const fwdBtn = document.createElement("button");
+    fwdBtn.type = "button";
+    fwdBtn.className = "msg-action-btn";
+    fwdBtn.textContent = "İlet";
+    fwdBtn.title = "Mesajı ilet";
+    fwdBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openForwardModal(msg);
+    });
+    actions.appendChild(fwdBtn);
     const pinBtn = document.createElement("button");
     pinBtn.type = "button";
     pinBtn.className = "msg-action-btn";
@@ -420,6 +500,63 @@
     });
     actions.appendChild(pinBtn);
     rowEl.appendChild(actions);
+  }
+
+  function openForwardModal(msg) {
+    const text = msg.message;
+    const isImg = text && String(text).startsWith("data:image/");
+    if (isImg) return showToast("Görsel iletme desteklenmiyor");
+    const modal = document.createElement("div");
+    modal.className = "modal modal-animate";
+    modal.innerHTML = `
+      <div class="modal-card" style="max-width: 360px;">
+        <div class="modal-title">Mesajı ilet</div>
+        <p class="subtitle">İletilecek mesaj: ${String(text || "").slice(0, 80)}${(text || "").length > 80 ? "…" : ""}</p>
+        <div class="forward-target-list" id="forward-target-list"></div>
+        <div class="modal-actions">
+          <button type="button" class="call-btn" data-action="cancel">İptal</button>
+        </div>
+      </div>
+    `;
+    modal.classList.remove("hidden");
+    document.body.appendChild(modal);
+    const list = modal.querySelector("#forward-target-list");
+    const friends = relationships.friends || [];
+    const myGroups = groups || [];
+    const fwdText = (msg.fromUsername ? `[İletildi: ${msg.fromUsername}] ` : "") + (text || "");
+    friends.forEach((u) => {
+      if (u === currentUsername) return;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "forward-target-btn";
+      btn.textContent = u;
+      btn.addEventListener("click", () => {
+        if (socket) socket.emit("privateMessage", { toUsername: u, message: fwdText });
+        modal.remove();
+        showToast("Mesaj iletildi");
+      });
+      list.appendChild(btn);
+    });
+    myGroups.forEach((g) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "forward-target-btn";
+      btn.textContent = "📁 " + (g.name || g.id);
+      btn.addEventListener("click", () => {
+        if (socket) socket.emit("groupMessage", { groupId: g.id, message: fwdText });
+        modal.remove();
+        showToast("Mesaj iletildi");
+      });
+      list.appendChild(btn);
+    });
+    if (!list.children.length) {
+      const p = document.createElement("p");
+      p.className = "subtitle";
+      p.textContent = "İletilecek sohbet yok. Arkadaş ekle veya gruba katıl.";
+      list.appendChild(p);
+    }
+    modal.querySelector('[data-action="cancel"]').addEventListener("click", () => modal.remove());
+    modal.addEventListener("click", (e) => { if (e.target === modal) modal.remove(); });
   }
 
   function addReplyHandler(rowEl, msg) {
@@ -456,7 +593,8 @@
       groupConversations[groupId] = loadGroupFromStorage(groupId);
     }
     messagesContainer.innerHTML = "";
-    let history = groupConversations[groupId] || [];
+    const deletedForMe = loadDeletedForMeGroup(groupId);
+    let history = (groupConversations[groupId] || []).filter((m) => !m.id || !deletedForMe.has(m.id));
     const q = String(searchQuery || "").trim().toLowerCase();
     if (q) history = history.filter((m) => {
       const msg = String(m.message || "");
@@ -496,7 +634,12 @@
     if (!userListEl) return;
     userListEl.innerHTML = "";
 
-    const others = onlineUsers.filter((u) => u !== currentUsername);
+    const onlineSet = new Set(onlineUsers.filter((u) => u !== currentUsername));
+    const friendsSet = new Set(relationships.friends || []);
+    const others = [...onlineSet];
+    friendsSet.forEach((u) => {
+      if (u !== currentUsername && !onlineSet.has(u)) others.push(u);
+    });
 
     if (!others.length) {
       const empty = document.createElement("div");
@@ -531,7 +674,7 @@
       avatar.title = username;
 
       const dot = document.createElement("span");
-      dot.className = "user-dot";
+      dot.className = "user-dot" + (onlineUsers.includes(username) ? "" : " offline");
 
       const nameWrap = document.createElement("div");
       nameWrap.style.display = "flex";
