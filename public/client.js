@@ -26,6 +26,11 @@
   const incomingSubtitleEl = document.getElementById("incoming-call-subtitle");
   const incomingAcceptBtn = document.getElementById("incoming-accept-btn");
   const incomingRejectBtn = document.getElementById("incoming-reject-btn");
+
+  const contactModalEl = document.getElementById("contact-modal");
+  const contactOpenBtn = document.getElementById("contact-open-btn");
+  const contactCloseBtn = document.getElementById("contact-close-btn");
+
   const messageForm = document.getElementById("message-form");
   const messageInput = document.getElementById("message-input");
   const messagesContainer = document.getElementById("messages");
@@ -798,6 +803,20 @@
   incomingAcceptBtn?.addEventListener("click", () => acceptIncomingCall());
   incomingRejectBtn?.addEventListener("click", () => rejectIncomingCall());
 
+  contactOpenBtn?.addEventListener("click", () => {
+    contactModalEl?.classList.remove("hidden");
+  });
+
+  contactCloseBtn?.addEventListener("click", () => {
+    contactModalEl?.classList.add("hidden");
+  });
+
+  contactModalEl?.addEventListener("click", (event) => {
+    if (event.target === contactModalEl) {
+      contactModalEl.classList.add("hidden");
+    }
+  });
+
   const addFriendUsernameInput = document.getElementById("add-friend-username");
   const addFriendBtn = document.getElementById("add-friend-btn");
   const addFriendHintEl = document.getElementById("add-friend-hint");
@@ -810,15 +829,6 @@
       userSearchResultsEl.classList.add("hidden");
       return;
     }
-    try {
-      const res = await fetch("/api/users/search?q=" + encodeURIComponent(q) + "&exclude=" + encodeURIComponent(currentUsername));
-      const data = await res.json();
-      const list = Array.isArray(data.users) ? data.users : [];
-      userSearchResultsEl.innerHTML = "";
-      if (!list.length) {
-        userSearchResultsEl.classList.add("hidden");
-        return;
-      }
       list.forEach((username) => {
         const status = relationships.friends.includes(username)
           ? "Arkadaş"

@@ -511,6 +511,21 @@ button:active {
   box-shadow: 0 10px 20px rgba(30, 64, 175, 0.7);
 }
 
+.text-btn {
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  border-radius: 999px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.text-btn:hover {
+  color: var(--text-main);
+}
+
 .hint {
   margin-top: 8px;
   font-size: 12px;
