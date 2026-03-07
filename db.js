@@ -24,6 +24,9 @@ function createDb({ databaseUrl }) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
+    `).catch(() => {});
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS friends (
@@ -69,6 +72,104 @@ function createDb({ databaseUrl }) {
         PRIMARY KEY (group_id, username)
       );
     `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        conv_type TEXT NOT NULL,
+        conv_id TEXT NOT NULL,
+        from_username TEXT NOT NULL,
+        message TEXT NOT NULL,
+        reply_to JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        edited_at TIMESTAMPTZ,
+        deleted BOOLEAN NOT NULL DEFAULT FALSE,
+        pinned BOOLEAN NOT NULL DEFAULT FALSE,
+        reactions JSONB NOT NULL DEFAULT '{}'
+      );
+    `);
+  }
+
+  async function updateLastSeen(username) {
+    try {
+      await pool.query("UPDATE users SET last_seen = NOW() WHERE username = $1", [username]);
+    } catch {}
+  }
+
+  async function getLastSeen(username) {
+    try {
+      const { rows } = await pool.query("SELECT last_seen FROM users WHERE username = $1", [username]);
+      return rows[0]?.last_seen;
+    } catch {
+      return null;
+    }
+  }
+
+  async function insertMessage({ convType, convId, fromUsername, message, replyTo }) {
+    const { rows } = await pool.query(
+      `INSERT INTO messages (conv_type, conv_id, from_username, message, reply_to)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, created_at`,
+      [convType, convId, fromUsername, message, replyTo ? JSON.stringify(replyTo) : null]
+    );
+    return rows[0];
+  }
+
+  async function getMessages(convType, convId, limit = 100) {
+    const { rows } = await pool.query(
+      `SELECT id, from_username, message, reply_to, created_at, edited_at, deleted, pinned, reactions
+       FROM messages
+       WHERE conv_type = $1 AND conv_id = $2 AND deleted = FALSE
+       ORDER BY created_at DESC LIMIT $3`,
+      [convType, convId, limit]
+    );
+    return rows.reverse();
+  }
+
+  async function editMessage(id, fromUsername, newMessage) {
+    const { rowCount } = await pool.query(
+      `UPDATE messages SET message = $2, edited_at = NOW() WHERE id = $1::uuid AND from_username = $3 AND deleted = FALSE`,
+      [id, newMessage, fromUsername]
+    );
+    return rowCount > 0;
+  }
+
+  async function deleteMessage(id, fromUsername) {
+    const { rowCount } = await pool.query(
+      `UPDATE messages SET deleted = TRUE WHERE id = $1::uuid AND from_username = $2`,
+      [id, fromUsername]
+    );
+    return rowCount > 0;
+  }
+
+  async function setMessagePinned(id, pinned, username) {
+    const msg = await pool.query("SELECT from_username FROM messages WHERE id = $1::uuid AND deleted = FALSE", [id]);
+    if (!msg.rows.length) return false;
+    const { rowCount } = await pool.query(
+      `UPDATE messages SET pinned = $2 WHERE id = $1::uuid AND deleted = FALSE`,
+      [id, !!pinned]
+    );
+    return rowCount > 0;
+  }
+
+  async function toggleReaction(id, username, emoji) {
+    const { rows } = await pool.query("SELECT reactions FROM messages WHERE id = $1::uuid AND deleted = FALSE", [id]);
+    if (!rows.length) return null;
+    let reactions = rows[0].reactions || {};
+    if (typeof reactions === "string") reactions = JSON.parse(reactions);
+    const list = reactions[emoji] || [];
+    const idx = list.indexOf(username);
+    if (idx >= 0) list.splice(idx, 1);
+    else list.push(username);
+    if (list.length) reactions[emoji] = list;
+    else delete reactions[emoji];
+    await pool.query("UPDATE messages SET reactions = $2::jsonb WHERE id = $1::uuid", [id, JSON.stringify(reactions)]);
+    return reactions;
+  }
+
+  async function getMessage(id) {
+    const { rows } = await pool.query("SELECT * FROM messages WHERE id = $1::uuid", [id]);
+    return rows[0] || null;
   }
 
   async function userExists(username) {
@@ -280,6 +381,15 @@ function createDb({ databaseUrl }) {
   return {
     init,
     pool,
+    updateLastSeen,
+    getLastSeen,
+    insertMessage,
+    getMessages,
+    getMessage,
+    editMessage,
+    deleteMessage,
+    setMessagePinned,
+    toggleReaction,
     userExists,
     searchUsers,
     createUser,

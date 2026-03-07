@@ -43,6 +43,13 @@
   const createGroupCancelBtn = document.getElementById("create-group-cancel-btn");
   const panelTabs = document.querySelectorAll(".panel-tab");
   const leaveGroupBtn = document.getElementById("leave-group-btn");
+  const typingIndicatorEl = document.getElementById("typing-indicator");
+  const typingUsernameEl = document.getElementById("typing-username");
+  const viewingIndicatorEl = document.getElementById("viewing-indicator");
+  const viewingUsernameEl = document.getElementById("viewing-username");
+  const themeToggle = document.getElementById("theme-toggle");
+  const messageSearchEl = document.getElementById("message-search");
+  const toastContainer = document.getElementById("toast-container");
 
   // Refresh sonrası son kullanıcı adını hatırla (giriş ekranında doldur)
   try {
@@ -106,9 +113,12 @@
     outgoingRequests: [],
   };
   const unreadCounts = {}; // username -> number
+  const lastSeenCache = {}; // username -> iso string
 
   let notificationsEnabled = false;
   let windowFocused = true;
+  let typingTimeout = null;
+  let typingHideTimeout = null;
 
   // WebRTC call state (1:1)
   let pc = null;
@@ -156,8 +166,13 @@
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
   }
 
-  function createMessageElement({ username, message, time, type, isMe }) {
+  let replyingTo = null;
+
+  function createMessageElement({ id, username, message, time, type, isMe, replyTo, editedAt, pinned, reactions }) {
     const row = document.createElement("div");
+    row.className = "message-row-wrapper";
+    if (id) row.dataset.messageId = id;
+
     const bubble = document.createElement("div");
 
     if (type === "system") {
@@ -168,8 +183,15 @@
       return row;
     }
 
-    row.className = `message-row ${isMe ? "me" : "other"}`;
+    row.className = `message-row-wrapper message-row ${isMe ? "me" : "other"}`;
     bubble.className = "message-bubble";
+
+    if (replyTo && (replyTo.username || replyTo.message)) {
+      const replyBlock = document.createElement("div");
+      replyBlock.className = "message-reply-preview";
+      replyBlock.innerHTML = `<strong>${replyTo.username || "?"}</strong>: ${String(replyTo.message || "").slice(0, 50)}${(replyTo.message || "").length > 50 ? "…" : ""}`;
+      bubble.appendChild(replyBlock);
+    }
 
     const meta = document.createElement("div");
     meta.className = "message-meta";
@@ -181,58 +203,273 @@
     const timeSpan = document.createElement("span");
     timeSpan.className = "message-time";
     timeSpan.textContent = formatTime(time);
+    if (editedAt) {
+      const ed = document.createElement("span");
+      ed.className = "message-edited";
+      ed.textContent = " (düzenlendi)";
+      timeSpan.appendChild(ed);
+    }
 
     meta.appendChild(usernameSpan);
     meta.appendChild(timeSpan);
+    if (pinned) {
+      const pin = document.createElement("span");
+      pin.className = "message-pin-badge";
+      pin.textContent = " 📌";
+      meta.appendChild(pin);
+    }
 
-    const text = document.createElement("p");
-    text.className = "message-text";
-    text.textContent = message;
+    const content = document.createElement("div");
+    content.className = "message-content";
+    if (type === "image" || (message && message.startsWith("data:image/"))) {
+      const img = document.createElement("img");
+      img.className = "message-image";
+      img.src = message;
+      img.alt = "Görsel";
+      content.appendChild(img);
+    } else {
+      const text = document.createElement("p");
+      text.className = "message-text";
+      text.textContent = message;
+      content.appendChild(text);
+    }
 
     bubble.appendChild(meta);
-    bubble.appendChild(text);
+    bubble.appendChild(content);
+
+    if (reactions && typeof reactions === "object" && Object.keys(reactions).length) {
+      const reactEl = document.createElement("div");
+      reactEl.className = "message-reactions";
+      for (const [emoji, users] of Object.entries(reactions)) {
+        if (!users || !users.length) continue;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "reaction-btn";
+        btn.textContent = emoji + (users.length > 1 ? " " + users.length : "");
+        btn.title = users.join(", ");
+        if (id) {
+          btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (socket) socket.emit("message:react", { id, emoji });
+          });
+        }
+        reactEl.appendChild(btn);
+      }
+      bubble.appendChild(reactEl);
+    }
+
     row.appendChild(bubble);
 
     return row;
   }
 
-  function renderMessagesFor(user) {
+  let messageSearchQuery = "";
+  let viewingChatUser = null;
+  let viewingChatTimeout = null;
+
+  async function fetchAndRenderMessagesForUser(user) {
+    const convId = [currentUsername, user].sort().join("_");
+    try {
+      const res = await fetch(`/api/messages?convType=pm&convId=${encodeURIComponent(convId)}`);
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.messages) && data.messages.length) {
+        const list = data.messages.map((m) => ({
+          id: m.id,
+          fromUsername: m.fromUsername,
+          toUsername: user === m.fromUsername ? currentUsername : user,
+          message: m.message,
+          time: m.time,
+          replyTo: m.replyTo,
+          editedAt: m.editedAt,
+          pinned: m.pinned,
+          reactions: m.reactions || {},
+        }));
+        const byId = new Map(list.filter((m) => m.id).map((m) => [m.id, m]));
+        (conversations[user] || []).forEach((m) => {
+          if (m.id && !byId.has(m.id)) list.push(m);
+          else if (!m.id) list.push(m);
+        });
+        list.sort((a, b) => new Date(a.time) - new Date(b.time));
+        conversations[user] = list;
+        saveConvToStorage(user, list);
+      }
+    } catch {}
+    renderMessagesFor(user, messageSearchQuery);
+  }
+
+  async function fetchAndRenderMessagesForGroup(groupId) {
+    try {
+      const res = await fetch(`/api/messages?convType=group&convId=${encodeURIComponent(groupId)}`);
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.messages) && data.messages.length) {
+        const list = data.messages.map((m) => ({
+          id: m.id,
+          fromUsername: m.fromUsername,
+          message: m.message,
+          time: m.time,
+          replyTo: m.replyTo,
+          editedAt: m.editedAt,
+          pinned: m.pinned,
+          reactions: m.reactions || {},
+        }));
+        const byId = new Set(list.filter((m) => m.id).map((m) => m.id));
+        (groupConversations[groupId] || []).forEach((m) => {
+          if (m.id && !byId.has(m.id)) list.push(m);
+          else if (!m.id) list.push(m);
+        });
+        list.sort((a, b) => new Date(a.time) - new Date(b.time));
+        groupConversations[groupId] = list;
+        saveGroupToStorage(groupId, list);
+      }
+    } catch {}
+    renderMessagesForGroup(groupId, messageSearchQuery);
+  }
+
+  function renderMessagesFor(user, searchQuery) {
     if (!messagesContainer) return;
     if (!conversations[user]) {
       conversations[user] = loadConvFromStorage(user);
     }
     messagesContainer.innerHTML = "";
-    const history = conversations[user] || [];
+    let history = conversations[user] || [];
+    const q = String(searchQuery || "").trim().toLowerCase();
+    if (q) history = history.filter((m) => {
+      const msg = String(m.message || "");
+      if (msg.startsWith("data:image/")) return false;
+      return msg.toLowerCase().includes(q);
+    });
     history.forEach((msg) => {
       const isMe = msg.fromUsername === currentUsername;
       const el = createMessageElement({
+        id: msg.id,
         username: msg.fromUsername,
-        message: msg.message,
+        message: msg.deleted ? "(mesaj silindi)" : msg.message,
         time: msg.time,
-        type: "user",
+        type: msg.deleted ? "user" : (msg.message && String(msg.message).startsWith("data:image/") ? "image" : "user"),
         isMe,
+        replyTo: msg.replyTo,
+        editedAt: msg.editedAt,
+        pinned: msg.pinned,
+        reactions: msg.reactions,
       });
+      addReplyHandler(el, msg);
+      addMessageActions(el, msg);
       messagesContainer.appendChild(el);
     });
     scrollToBottom();
   }
 
-  function renderMessagesForGroup(groupId) {
+  function addMessageActions(rowEl, msg) {
+    if (!msg || msg.type === "system" || msg.deleted) return;
+    const id = msg.id;
+    if (!id) return;
+    const isMe = msg.fromUsername === currentUsername;
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+    const reactBtn = document.createElement("button");
+    reactBtn.type = "button";
+    reactBtn.className = "msg-action-btn";
+    reactBtn.textContent = "👍";
+    reactBtn.title = "Reaksiyon";
+    reactBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (socket) socket.emit("message:react", { id, emoji: "👍" });
+    });
+    actions.appendChild(reactBtn);
+    const react2 = reactBtn.cloneNode(true);
+    react2.textContent = "❤️";
+    react2.onclick = () => socket?.emit("message:react", { id, emoji: "❤️" });
+    actions.appendChild(react2);
+    if (isMe) {
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "msg-action-btn danger";
+      delBtn.textContent = "Sil";
+      delBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (socket) socket.emit("message:delete", { id });
+      });
+      actions.appendChild(delBtn);
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "msg-action-btn";
+      editBtn.textContent = "Düzenle";
+      editBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const newMsg = prompt("Yeni mesaj:", msg.message);
+        if (newMsg != null && newMsg.trim() && socket) socket.emit("message:edit", { id, newMessage: newMsg.trim() });
+      });
+      actions.appendChild(editBtn);
+    }
+    const pinBtn = document.createElement("button");
+    pinBtn.type = "button";
+    pinBtn.className = "msg-action-btn";
+    pinBtn.textContent = msg.pinned ? "📌 Kaldır" : "📌 Sabitle";
+    pinBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (socket) socket.emit("message:pin", { id, pinned: !msg.pinned });
+    });
+    actions.appendChild(pinBtn);
+    rowEl.appendChild(actions);
+  }
+
+  function addReplyHandler(rowEl, msg) {
+    if (!msg || msg.type === "system") return;
+    const bubble = rowEl.querySelector(".message-bubble");
+    if (bubble) {
+      bubble.style.cursor = "pointer";
+      bubble.addEventListener("click", (e) => {
+        if (e.target.closest(".message-actions") || e.target.closest(".reaction-btn")) return;
+        replyingTo = { username: msg.fromUsername, message: msg.message };
+        updateReplyPreview();
+      });
+    }
+  }
+
+  function updateReplyPreview() {
+    const existing = document.getElementById("reply-preview");
+    if (existing) existing.remove();
+    if (!replyingTo || !messageForm) return;
+    const wrap = document.createElement("div");
+    wrap.id = "reply-preview";
+    wrap.className = "reply-preview";
+    wrap.innerHTML = `<span>Yanıt: ${replyingTo.username}: ${String(replyingTo.message || "").slice(0, 40)}…</span> <button type="button" class="reply-cancel-btn">✕</button>`;
+    wrap.querySelector(".reply-cancel-btn").addEventListener("click", () => {
+      replyingTo = null;
+      updateReplyPreview();
+    });
+    messageForm.parentNode.insertBefore(wrap, messageForm);
+  }
+
+  function renderMessagesForGroup(groupId, searchQuery) {
     if (!messagesContainer) return;
     if (!groupConversations[groupId]) {
       groupConversations[groupId] = loadGroupFromStorage(groupId);
     }
     messagesContainer.innerHTML = "";
-    const history = groupConversations[groupId] || [];
+    let history = groupConversations[groupId] || [];
+    const q = String(searchQuery || "").trim().toLowerCase();
+    if (q) history = history.filter((m) => {
+      const msg = String(m.message || "");
+      if (msg.startsWith("data:image/")) return false;
+      return msg.toLowerCase().includes(q);
+    });
     history.forEach((msg) => {
       const isMe = msg.fromUsername === currentUsername;
       const el = createMessageElement({
+        id: msg.id,
         username: msg.fromUsername,
-        message: msg.message,
+        message: msg.deleted ? "(mesaj silindi)" : msg.message,
         time: msg.time,
-        type: "user",
+        type: msg.deleted ? "user" : (msg.message && String(msg.message).startsWith("data:image/") ? "image" : "user"),
         isMe,
+        replyTo: msg.replyTo,
+        editedAt: msg.editedAt,
+        pinned: msg.pinned,
+        reactions: msg.reactions,
       });
+      addReplyHandler(el, msg);
+      addMessageActions(el, msg);
       messagesContainer.appendChild(el);
     });
     scrollToBottom();
@@ -279,15 +516,40 @@
       const main = document.createElement("div");
       main.className = "user-main";
 
+      const avatar = document.createElement("span");
+      avatar.className = "user-avatar";
+      avatar.textContent = (username[0] || "?").toUpperCase();
+      avatar.title = username;
+
       const dot = document.createElement("span");
       dot.className = "user-dot";
 
+      const nameWrap = document.createElement("div");
+      nameWrap.style.display = "flex";
+      nameWrap.style.flexDirection = "column";
+      nameWrap.style.gap = "2px";
       const name = document.createElement("span");
       name.className = "user-name";
       name.textContent = username;
+      nameWrap.appendChild(name);
 
+      const isOnline = onlineUsers.includes(username);
+      if (!isOnline && status === "friend" && lastSeenCache[username]) {
+        const lastSeen = document.createElement("span");
+        lastSeen.className = "last-seen";
+        const d = new Date(lastSeenCache[username]);
+        const now = new Date();
+        const diff = (now - d) / 1000;
+        if (diff < 60) lastSeen.textContent = "Az önce";
+        else if (diff < 3600) lastSeen.textContent = Math.floor(diff / 60) + " dk önce";
+        else if (diff < 86400) lastSeen.textContent = Math.floor(diff / 3600) + " sa önce";
+        else lastSeen.textContent = d.toLocaleDateString("tr-TR");
+        nameWrap.appendChild(lastSeen);
+      }
+
+      main.appendChild(avatar);
       main.appendChild(dot);
-      main.appendChild(name);
+      main.appendChild(nameWrap);
 
       const rightSide = document.createElement("div");
       rightSide.style.display = "flex";
@@ -424,7 +686,13 @@
         if (callAudioBtn) callAudioBtn.disabled = false;
         if (callVideoBtn) callVideoBtn.disabled = false;
 
-        renderMessagesFor(username);
+        if (messageSearchEl) {
+          messageSearchEl.classList.remove("hidden");
+          messageSearchEl.value = messageSearchQuery = "";
+        }
+        if (viewingIndicatorEl) viewingIndicatorEl.classList.add("hidden");
+        if (socket) socket.emit("viewingChat", { toUsername: username });
+        fetchAndRenderMessagesForUser(username);
         renderUserList();
         renderGroupList();
       });
@@ -472,7 +740,13 @@
         if (leaveGroupBtn) leaveGroupBtn.classList.remove("hidden");
         callAudioBtn.disabled = true;
         callVideoBtn.disabled = true;
-        renderMessagesForGroup(g.id);
+        if (messageSearchEl) {
+          messageSearchEl.classList.remove("hidden");
+          messageSearchEl.value = messageSearchQuery = "";
+        }
+        if (viewingIndicatorEl) viewingIndicatorEl.classList.add("hidden");
+        if (socket) socket.emit("viewingChat", { groupId: g.id });
+        fetchAndRenderMessagesForGroup(g.id);
         renderUserList();
         renderGroupList();
       });
@@ -509,6 +783,7 @@
       groups = groups.filter((g) => g.id !== activeGroupId);
       delete groupConversations[activeGroupId];
       activeGroupId = null;
+      if (messageSearchEl) messageSearchEl.classList.add("hidden");
       if (leaveGroupBtn) leaveGroupBtn.classList.add("hidden");
       if (chatTitleEl && chatSubtitleEl) {
         chatTitleEl.textContent = "Bir kullanıcı seç";
@@ -523,17 +798,14 @@
 
   leaveGroupBtn?.addEventListener("click", leaveGroup);
 
-  function maybeShowNotification(fromUsername, message) {
-    if (!notificationsEnabled) return;
+  function maybeShowNotification(fromUsername, message, playSound) {
     if (!fromUsername || !message) return;
-    if (windowFocused) return;
-
-    try {
-      new Notification("Rainbow Chat", {
-        body: `${fromUsername}: ${message}`,
-      });
-    } catch {
-      // sessizce geç
+    const shouldNotify = !windowFocused && notificationsEnabled;
+    if (playSound !== false) playNotificationSound();
+    if (shouldNotify) {
+      try {
+        new Notification("Rainbow Chat", { body: `${fromUsername}: ${message}` });
+      } catch {}
     }
   }
 
@@ -555,6 +827,35 @@
   window.addEventListener("focus", () => {
     windowFocused = true;
   });
+
+  window.addEventListener("blur", () => {
+    windowFocused = false;
+  });
+
+  function playNotificationSound() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = 800;
+      osc.type = "sine";
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.15);
+    } catch {}
+  }
+
+  function showToast(message, type) {
+    if (!toastContainer) return;
+    const toast = document.createElement("div");
+    toast.className = "toast" + (type === "new-friend" ? " new-friend" : "");
+    toast.textContent = message;
+    toastContainer.appendChild(toast);
+    setTimeout(() => toast.remove(), 4000);
+  }
 
   function setCallPanelVisible(visible) {
     if (!callPanelEl) return;
@@ -1121,12 +1422,158 @@
           scrollToBottom();
         });
 
-        socket.on("userList", (list) => {
+        socket.on("userList", async (list) => {
           onlineUsers = Array.isArray(list) ? list : [];
+          try {
+            const friendsToFetch = (relationships.friends || []).filter((u) => !onlineUsers.includes(u));
+            if (friendsToFetch.length) {
+              const res = await fetch("/api/last-seen?usernames=" + friendsToFetch.map(encodeURIComponent).join(","));
+              const data = await res.json();
+              if (res.ok && data) Object.assign(lastSeenCache, data);
+            }
+          } catch {}
           renderUserList();
         });
 
+        socket.on("userTyping", ({ username, toUsername, groupId }) => {
+          if (typingHideTimeout) clearTimeout(typingHideTimeout);
+          const inThisChat =
+            (toUsername && activeChatUser === toUsername && !activeGroupId) ||
+            (groupId && activeGroupId === groupId);
+          if (!inThisChat || username === currentUsername) return;
+          if (typingIndicatorEl && typingUsernameEl) {
+            typingUsernameEl.textContent = username;
+            typingIndicatorEl.classList.remove("hidden");
+          }
+          typingHideTimeout = setTimeout(() => {
+            if (typingIndicatorEl) typingIndicatorEl.classList.add("hidden");
+            typingHideTimeout = null;
+          }, 3000);
+        });
+
+        socket.on("userViewingChat", ({ username }) => {
+          if (viewingChatTimeout) clearTimeout(viewingChatTimeout);
+          viewingChatUser = username;
+          if (viewingIndicatorEl && viewingUsernameEl) {
+            viewingUsernameEl.textContent = username;
+            viewingIndicatorEl.classList.remove("hidden");
+          }
+          viewingChatTimeout = setTimeout(() => {
+            if (viewingIndicatorEl) viewingIndicatorEl.classList.add("hidden");
+            viewingChatUser = null;
+            viewingChatTimeout = null;
+          }, 5000);
+        });
+
+        socket.on("message:updated", ({ id, newMessage, editedAt }) => {
+          const update = (list) => {
+            const m = list.find((x) => x.id === id);
+            if (m) {
+              m.message = newMessage;
+              m.editedAt = editedAt;
+            }
+          };
+          if (activeChatUser) {
+            const list = conversations[activeChatUser];
+            if (list) update(list);
+            saveConvToStorage(activeChatUser, list);
+          }
+          if (activeGroupId) {
+            const list = groupConversations[activeGroupId];
+            if (list) update(list);
+            saveGroupToStorage(activeGroupId, list);
+          }
+          const row = messagesContainer?.querySelector(`[data-message-id="${id}"]`);
+          if (row) {
+            const text = row.querySelector(".message-text");
+            if (text) text.textContent = newMessage;
+          }
+        });
+
+        socket.on("message:deleted", ({ id }) => {
+          const update = (list) => {
+            const m = list.find((x) => x.id === id);
+            if (m) m.deleted = true;
+          };
+          if (activeChatUser) {
+            const list = conversations[activeChatUser];
+            if (list) update(list);
+            saveConvToStorage(activeChatUser, list);
+          }
+          if (activeGroupId) {
+            const list = groupConversations[activeGroupId];
+            if (list) update(list);
+            saveGroupToStorage(activeGroupId, list);
+          }
+          const row = messagesContainer?.querySelector(`[data-message-id="${id}"]`);
+          if (row) {
+            const text = row.querySelector(".message-text");
+            if (text) text.textContent = "(mesaj silindi)";
+          }
+        });
+
+        socket.on("message:pinned", ({ id, pinned }) => {
+          const update = (list) => {
+            const m = list.find((x) => x.id === id);
+            if (m) m.pinned = pinned;
+          };
+          if (activeChatUser) {
+            const list = conversations[activeChatUser];
+            if (list) update(list);
+          }
+          if (activeGroupId) {
+            const list = groupConversations[activeGroupId];
+            if (list) update(list);
+          }
+          const row = messagesContainer?.querySelector(`[data-message-id="${id}"]`);
+          if (row) {
+            let pin = row.querySelector(".message-pin-badge");
+            if (pinned && !pin) {
+              pin = document.createElement("span");
+              pin.className = "message-pin-badge";
+              pin.textContent = " 📌";
+              row.querySelector(".message-meta")?.appendChild(pin);
+            } else if (!pinned && pin) pin.remove();
+          }
+        });
+
+        socket.on("message:reactions", ({ id, reactions }) => {
+          const update = (list) => {
+            const m = list.find((x) => x.id === id);
+            if (m) m.reactions = reactions || {};
+          };
+          if (activeChatUser) {
+            const list = conversations[activeChatUser];
+            if (list) update(list);
+          }
+          if (activeGroupId) {
+            const list = groupConversations[activeGroupId];
+            if (list) update(list);
+          }
+          const row = messagesContainer?.querySelector(`[data-message-id="${id}"]`);
+          if (row) {
+            const old = row.querySelector(".message-reactions");
+            if (old) old.remove();
+            const bubble = row.querySelector(".message-bubble");
+            if (bubble && reactions) {
+              const reactEl = document.createElement("div");
+              reactEl.className = "message-reactions";
+              for (const [emoji, users] of Object.entries(reactions)) {
+                if (!users || !users.length) continue;
+                const btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "reaction-btn";
+                btn.textContent = emoji + (users.length > 1 ? " " + users.length : "");
+                btn.addEventListener("click", () => socket?.emit("message:react", { id, emoji }));
+                reactEl.appendChild(btn);
+              }
+              if (reactEl.childNodes.length) bubble.appendChild(reactEl);
+            }
+          }
+        });
+
         socket.on("relationships", (data) => {
+          const prevFriends = new Set(relationships.friends || []);
           relationships = {
             friends: Array.isArray(data?.friends) ? data.friends : [],
             blocked: Array.isArray(data?.blocked) ? data.blocked : [],
@@ -1138,8 +1585,14 @@
               : [],
           };
 
+          const newFriends = (relationships.friends || []).filter((u) => !prevFriends.has(u));
+          if (newFriends.length) {
+            newFriends.forEach((u) => showToast("Yeni arkadaşınız var: " + u, "new-friend"));
+          }
+
           if (activeChatUser && !isFriend(activeChatUser)) {
             activeChatUser = null;
+            if (messageSearchEl) messageSearchEl.classList.add("hidden");
             if (chatTitleEl && chatSubtitleEl) {
               chatTitleEl.textContent = "Bir kullanıcı seç";
               chatSubtitleEl.textContent =
@@ -1160,28 +1613,36 @@
         });
 
         socket.on("groupMessage", (payload) => {
-          const { groupId, fromUsername, message, time } = payload;
+          const { groupId, fromUsername, message, time, replyTo } = payload;
           if (!groupId) return;
           if (!groupConversations[groupId]) groupConversations[groupId] = [];
-          groupConversations[groupId].push({ fromUsername, message, time });
+          groupConversations[groupId].push({ id: payload.id, fromUsername, message, time, replyTo });
           saveGroupToStorage(groupId, groupConversations[groupId]);
           if (activeGroupId === groupId) {
             const isMe = fromUsername === currentUsername;
+            const isImg = message && String(message).startsWith("data:image/");
+            const msg = { id: payload.id, fromUsername, message, replyTo };
             const el = createMessageElement({
+              id: payload.id,
               username: fromUsername,
               message,
               time,
-              type: "user",
+              type: isImg ? "image" : "user",
               isMe,
+              replyTo,
             });
+            addReplyHandler(el, msg);
+            addMessageActions(el, msg);
             messagesContainer.appendChild(el);
             scrollToBottom();
+          } else if (fromUsername !== currentUsername) {
+            maybeShowNotification(fromUsername + " (grup)", message);
           }
           renderGroupList();
         });
 
         socket.on("privateMessage", (payload) => {
-          const { fromUsername, toUsername, message, time } = payload;
+          const { fromUsername, toUsername, message, time, replyTo } = payload;
           const other =
             fromUsername === currentUsername ? toUsername : fromUsername;
           if (!other) return;
@@ -1190,22 +1651,30 @@
             conversations[other] = [];
           }
           conversations[other].push({
+            id: payload.id,
             fromUsername,
             toUsername,
             message,
             time,
+            replyTo,
           });
           saveConvToStorage(other, conversations[other]);
 
           if (activeChatUser === other) {
             const isMe = fromUsername === currentUsername;
+            const isImg = message && String(message).startsWith("data:image/");
+            const msg = { id: payload.id, fromUsername, message, replyTo };
             const el = createMessageElement({
+              id: payload.id,
               username: fromUsername,
               message,
               time,
-              type: "user",
+              type: isImg ? "image" : "user",
               isMe,
+              replyTo,
             });
+            addReplyHandler(el, msg);
+            addMessageActions(el, msg);
             messagesContainer.appendChild(el);
             scrollToBottom();
           } else if (fromUsername !== currentUsername) {
@@ -1341,6 +1810,71 @@
     }
   })();
 
+  messageSearchEl?.addEventListener("input", () => {
+    messageSearchQuery = messageSearchEl.value;
+    if (activeChatUser) renderMessagesFor(activeChatUser, messageSearchQuery);
+    else if (activeGroupId) renderMessagesForGroup(activeGroupId, messageSearchQuery);
+  });
+
+  messageInput?.addEventListener("input", () => {
+    if (!socket) return;
+    if (typingTimeout) clearTimeout(typingTimeout);
+    if (activeGroupId) {
+      socket.emit("typing", { groupId: activeGroupId });
+    } else if (activeChatUser && isFriend(activeChatUser)) {
+      socket.emit("typing", { toUsername: activeChatUser });
+    }
+    typingTimeout = setTimeout(() => {
+      typingTimeout = null;
+    }, 2000);
+  });
+
+  themeToggle?.addEventListener("click", () => {
+    const html = document.documentElement;
+    const isLight = html.getAttribute("data-theme") === "light";
+    html.setAttribute("data-theme", isLight ? "dark" : "light");
+    themeToggle.textContent = isLight ? "🌙" : "☀️";
+    try {
+      localStorage.setItem("rc_theme", isLight ? "dark" : "light");
+    } catch {}
+  });
+
+  (function initTheme() {
+    try {
+      const saved = localStorage.getItem("rc_theme");
+      if (saved === "light") {
+        document.documentElement.setAttribute("data-theme", "light");
+        if (themeToggle) themeToggle.textContent = "☀️";
+      }
+    } catch {}
+  })();
+
+  messageInput?.addEventListener("paste", (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    let item = null;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf("image") !== -1) {
+        item = items[i];
+        break;
+      }
+    }
+    if (!item || !socket) return;
+    e.preventDefault();
+    const file = item.getAsFile();
+    if (!file || file.size > 300000) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const data = reader.result;
+      if (activeGroupId) {
+        socket?.emit("groupMessage", { groupId: activeGroupId, message: data });
+      } else if (activeChatUser && isFriend(activeChatUser)) {
+        socket?.emit("privateMessage", { toUsername: activeChatUser, message: data });
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+
   messageForm?.addEventListener("submit", (e) => {
     e.preventDefault();
     if (!socket) return;
@@ -1348,8 +1882,15 @@
     const msg = messageInput.value.trim();
     if (!msg) return;
 
+    const payload = { message: msg };
+    if (replyingTo) {
+      payload.replyTo = replyingTo;
+      replyingTo = null;
+      updateReplyPreview();
+    }
+
     if (activeGroupId) {
-      socket.emit("groupMessage", { groupId: activeGroupId, message: msg });
+      socket.emit("groupMessage", { groupId: activeGroupId, ...payload });
       messageInput.value = "";
       return;
     }
@@ -1358,7 +1899,7 @@
 
     socket.emit("privateMessage", {
       toUsername: activeChatUser,
-      message: msg,
+      ...payload,
     });
 
     messageInput.value = "";

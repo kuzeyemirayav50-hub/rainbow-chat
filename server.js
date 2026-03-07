@@ -373,6 +373,44 @@ app.get("/api/status", async (req, res) => {
   }
 });
 
+app.get("/api/messages", async (req, res) => {
+  if (!db) return res.json({ messages: [] });
+  try {
+    const { convType, convId } = req.query || {};
+    if (!convType || !convId) return res.status(400).json({ error: "convType ve convId gerekli" });
+    const limit = Math.min(parseInt(req.query.limit) || 100, 200);
+    const rows = await db.getMessages(convType, convId, limit);
+    const messages = rows.map((r) => ({
+      id: r.id,
+      fromUsername: r.from_username,
+      message: r.message,
+      replyTo: r.reply_to,
+      time: r.created_at,
+      editedAt: r.edited_at,
+      deleted: r.deleted,
+      pinned: r.pinned,
+      reactions: r.reactions || {},
+    }));
+    return res.json({ messages });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/last-seen", async (req, res) => {
+  if (!db) return res.json({});
+  try {
+    const usernames = (req.query.usernames || "").split(",").filter(Boolean);
+    const result = {};
+    for (const u of usernames) {
+      result[u] = await db.getLastSeen(u);
+    }
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({});
+  }
+});
+
 // WebRTC ICE sunucuları (ses/görüntü araması için)
 app.get("/api/webrtc-config", (req, res) => {
   const iceServers = [
@@ -994,12 +1032,28 @@ io.on("connection", (socket) => {
     if (gid) socket.leave("group:" + gid);
   });
 
-  socket.on("groupMessage", ({ groupId, message }) => {
+  socket.on("typing", ({ toUsername, groupId }) => {
+    const from = socket.username;
+    if (!from) return;
+    if (toUsername) {
+      const targetSockets = userSockets.get(String(toUsername || "").trim());
+      if (targetSockets) {
+        targetSockets.forEach((sid) => {
+          io.to(sid).emit("userTyping", { username: from, toUsername: toUsername, groupId: null });
+        });
+      }
+    } else if (groupId) {
+      io.to("group:" + groupId).emit("userTyping", { username: from, toUsername: null, groupId });
+    }
+  });
+
+  socket.on("groupMessage", ({ groupId, message, replyTo }) => {
     void (async () => {
-      const text = String(message || "").trim();
+      const text = String(message || "");
       const gid = String(groupId || "").trim();
       const fromUsername = socket.username || "";
-      if (!text || !gid || !fromUsername) return;
+      const isImage = text.startsWith("data:image/");
+      if ((!text || (!isImage && !text.trim())) || !gid || !fromUsername) return;
 
       let isMember = false;
       if (db) {
@@ -1010,21 +1064,41 @@ io.on("connection", (socket) => {
       }
       if (!isMember) return;
 
+      const msgContent = text.trim() || text;
       const payload = {
         groupId: gid,
         fromUsername,
-        message: text,
+        message: msgContent,
         time: new Date().toISOString(),
       };
+      if (replyTo && typeof replyTo === "object") {
+        payload.replyTo = { username: replyTo.username, message: replyTo.message };
+      }
+      if (db) {
+        try {
+          const row = await db.insertMessage({
+            convType: "group",
+            convId: gid,
+            fromUsername,
+            message: msgContent,
+            replyTo: payload.replyTo,
+          });
+          payload.id = row.id;
+          payload.time = row.created_at;
+        } catch (e) {
+          console.error("insertMessage group:", e.message);
+        }
+      }
       io.to("group:" + gid).emit("groupMessage", payload);
     })();
   });
 
-  socket.on("privateMessage", ({ toUsername, message }) => {
+  socket.on("privateMessage", ({ toUsername, message, replyTo }) => {
     void (async () => {
-    const text = String(message || "").trim();
+    const text = String(message || "");
     const target = String(toUsername || "").trim();
-    if (!text || !target) return;
+    const isImage = text.startsWith("data:image/");
+    if ((!text || (!isImage && !text.trim())) || !target) return;
 
     const fromUsername = socket.username || "Bilinmeyen";
     const time = new Date().toISOString();
@@ -1034,12 +1108,33 @@ io.on("connection", (socket) => {
       return;
     }
 
+    const msgContent = text.trim() || text;
     const payload = {
       fromUsername,
       toUsername: target,
-      message: text,
+      message: msgContent,
       time,
     };
+    if (replyTo && typeof replyTo === "object") {
+      payload.replyTo = { username: replyTo.username, message: replyTo.message };
+    }
+
+    if (db) {
+      try {
+        const convId = [fromUsername, target].sort().join("_");
+        const row = await db.insertMessage({
+          convType: "pm",
+          convId,
+          fromUsername,
+          message: msgContent,
+          replyTo: payload.replyTo,
+        });
+        payload.id = row.id;
+        payload.time = row.created_at;
+      } catch (e) {
+        console.error("insertMessage pm:", e.message);
+      }
+    }
 
     // Hedef kullanıcının tüm socket'lerine gönder
     const targetSockets = userSockets.get(target);
@@ -1155,6 +1250,99 @@ io.on("connection", (socket) => {
     if (b) b.delete(id);
   });
 
+  socket.on("viewingChat", ({ toUsername, groupId }) => {
+    const from = socket.username;
+    if (!from) return;
+    if (toUsername) {
+      const targetSockets = userSockets.get(String(toUsername).trim());
+      if (targetSockets) {
+        targetSockets.forEach((sid) => io.to(sid).emit("userViewingChat", { username: from }));
+      }
+    } else if (groupId) {
+      io.to("group:" + groupId).emit("userViewingChat", { username: from });
+    }
+  });
+
+  socket.on("message:edit", async ({ id, newMessage }) => {
+    const from = socket.username;
+    if (!from || !id || typeof newMessage !== "string") return;
+    if (!db) return;
+    const ok = await db.editMessage(id, from, newMessage.trim());
+    if (!ok) return;
+    const msg = await db.getMessage(id);
+    if (!msg) return;
+    const convType = msg.conv_type;
+    const convId = msg.conv_id;
+    const payload = { id, newMessage: newMessage.trim(), editedAt: new Date().toISOString() };
+    if (convType === "pm") {
+      const [a, b] = convId.split("_");
+      emitToAllUserSockets(a, "message:updated", payload);
+      emitToAllUserSockets(b, "message:updated", payload);
+    } else {
+      io.to("group:" + convId).emit("message:updated", payload);
+    }
+  });
+
+  socket.on("message:delete", async ({ id }) => {
+    const from = socket.username;
+    if (!from || !id) return;
+    if (!db) return;
+    const ok = await db.deleteMessage(id, from);
+    if (!ok) return;
+    const msg = await db.getMessage(id);
+    if (!msg) return;
+    const convType = msg.conv_type;
+    const convId = msg.conv_id;
+    const payload = { id };
+    if (convType === "pm") {
+      const [a, b] = convId.split("_");
+      emitToAllUserSockets(a, "message:deleted", payload);
+      emitToAllUserSockets(b, "message:deleted", payload);
+    } else {
+      io.to("group:" + convId).emit("message:deleted", payload);
+    }
+  });
+
+  socket.on("message:pin", async ({ id, pinned }) => {
+    const from = socket.username;
+    if (!from || !id) return;
+    if (!db) return;
+    const ok = await db.setMessagePinned(id, pinned);
+    if (!ok) return;
+    const msg = await db.getMessage(id);
+    if (!msg) return;
+    const convType = msg.conv_type;
+    const convId = msg.conv_id;
+    const payload = { id, pinned: !!pinned };
+    if (convType === "pm") {
+      const [a, b] = convId.split("_");
+      emitToAllUserSockets(a, "message:pinned", payload);
+      emitToAllUserSockets(b, "message:pinned", payload);
+    } else {
+      io.to("group:" + convId).emit("message:pinned", payload);
+    }
+  });
+
+  socket.on("message:react", async ({ id, emoji }) => {
+    const from = socket.username;
+    if (!from || !id || !emoji) return;
+    if (!db) return;
+    const reactions = await db.toggleReaction(id, from, emoji);
+    if (reactions === null) return;
+    const msg = await db.getMessage(id);
+    if (!msg) return;
+    const convType = msg.conv_type;
+    const convId = msg.conv_id;
+    const payload = { id, reactions };
+    if (convType === "pm") {
+      const [a, b] = convId.split("_");
+      emitToAllUserSockets(a, "message:reactions", payload);
+      emitToAllUserSockets(b, "message:reactions", payload);
+    } else {
+      io.to("group:" + convId).emit("message:reactions", payload);
+    }
+  });
+
   socket.on("disconnect", () => {
     const username = sockets.get(socket.id);
     if (username) {
@@ -1164,6 +1352,7 @@ io.on("connection", (socket) => {
         set.delete(socket.id);
         if (set.size === 0) {
           userSockets.delete(username);
+          if (db) void db.updateLastSeen(username);
 
           // Kullanıcı tamamen offline olduysa aktif çağrılarını düşür
           const callSet = callsByUser.get(username);
