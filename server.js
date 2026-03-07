@@ -275,6 +275,7 @@ app.get("/api/status", async (req, res) => {
       storage: "file",
       ok: true,
       message: "Kullanıcılar dosyada (Render deploy'da sıfırlanabilir)",
+      database_url_defined: !!process.env.DATABASE_URL,
     });
   } catch (err) {
     return res.status(500).json({
