@@ -202,16 +202,20 @@ input[type="password"]:focus {
   border-radius: 12px;
   background: rgba(15, 23, 42, 0.5);
   border: 1px solid rgba(148, 163, 184, 0.2);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .add-friend-by-username {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 6px;
 }
 
 .add-friend-by-username input {
   flex: 1;
+  min-width: 0;
   padding: 8px 12px;
   border-radius: 10px;
   border: 1px solid var(--border-subtle);
@@ -225,6 +229,7 @@ input[type="password"]:focus {
 }
 
 .add-friend-by-username button {
+  flex-shrink: 0;
   padding: 8px 14px;
   border-radius: 10px;
   border: 1px solid rgba(34, 197, 94, 0.6);
