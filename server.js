@@ -261,6 +261,31 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
+app.get("/api/status", async (req, res) => {
+  try {
+    if (db) {
+      await db.pool.query("SELECT 1");
+      return res.json({
+        storage: "database",
+        ok: true,
+        message: "Kullanıcılar veritabanında kalıcı (deploy sonrası silinmez)",
+      });
+    }
+    return res.json({
+      storage: "file",
+      ok: true,
+      message: "Kullanıcılar dosyada (Render deploy'da sıfırlanabilir)",
+    });
+  } catch (err) {
+    return res.status(500).json({
+      storage: "database",
+      ok: false,
+      error: "Veritabanı bağlantı hatası - kullanıcılar KAYBEDİLİR",
+      detail: err.message,
+    });
+  }
+});
+
 // WebRTC ICE sunucuları (ses/görüntü araması için)
 app.get("/api/webrtc-config", (req, res) => {
   const iceServers = [
@@ -322,6 +347,8 @@ app.post("/api/register", async (req, res) => {
     const sessionToken = crypto.randomBytes(24).toString("hex");
     sessions.set(sessionToken, trimmedUsername);
     savePersistence();
+    const storage = db ? "veritabanı (PostgreSQL)" : "dosya (persistence.json)";
+    console.log(`[KAYIT] ${trimmedUsername} oluşturuldu → ${storage} (silinmeyecek)`);
     return res.json({ ok: true, username: trimmedUsername, sessionToken });
   } catch (err) {
     console.error("Register error:", err);
@@ -364,6 +391,8 @@ app.post("/api/login", async (req, res) => {
     const sessionToken = crypto.randomBytes(24).toString("hex");
     sessions.set(sessionToken, trimmedUsername);
     savePersistence();
+    const storage = db ? "veritabanı" : "dosya";
+    console.log(`[GİRİŞ] ${trimmedUsername} başarılı → ${storage} doğrulandı (hesap silinmemiş)`);
     return res.json({ ok: true, username: trimmedUsername, sessionToken });
   } catch (err) {
     console.error("Login error:", err);
@@ -976,11 +1005,19 @@ io.on("connection", (socket) => {
 
 async function start() {
   if (db) {
-    await db.init();
-    console.log("DB aktif: kullanıcılar/arkadaşlıklar kalıcı olacak.");
+    try {
+      await db.init();
+      await db.pool.query("SELECT 1");
+      console.log("[VERİTABANI] PostgreSQL bağlı → kullanıcılar SİLİNMEYECEK (deploy sonrası kalır)");
+    } catch (err) {
+      console.error("[HATA] Veritabanı bağlanamadı! Kullanıcılar deploy'da KAYBEDİLİR.");
+      console.error("DATABASE_URL kontrol et. Render: Web Service → Environment → DATABASE_URL");
+      console.error("Hata:", err.message);
+      throw err;
+    }
   } else {
     loadPersistence();
-    console.log("DB yok: hesaplar data/persistence.json dosyasına kaydediliyor (sunucu yeniden başlasa da kalır).");
+    console.log("[UYARI] DATABASE_URL yok → dosya kullanılıyor (Render deploy'da sıfırlanır!)");
   }
 
   server.listen(PORT, () => {
