@@ -232,6 +232,50 @@ input[type="password"]:focus {
   background: rgba(34, 197, 94, 0.35);
 }
 
+.user-search-results {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  padding: 6px 0;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.user-search-results.hidden {
+  display: none;
+}
+
+.search-result-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.search-result-name {
+  color: var(--text-main);
+}
+
+.search-result-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid rgba(34, 197, 94, 0.6);
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+  cursor: pointer;
+}
+
+.search-result-btn:hover:not(:disabled) {
+  background: rgba(34, 197, 94, 0.35);
+}
+
+.search-result-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .add-friend-hint {
   margin: 0 0 10px;
   font-size: 12px;

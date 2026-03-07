@@ -117,11 +117,15 @@
   // WebRTC config - sunucudan al (birden fazla STUN, TURN destekli)
   let rtcConfig = {
     iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
       { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun3.l.google.com:19302" },
+      { urls: "stun:stun4.l.google.com:19302" },
       { urls: "stun:stun.stunprotocol.org:3478" },
+      { urls: "stun:stun.freeswitch.org" },
     ],
+    iceCandidatePoolSize: 10,
+    bundlePolicy: "max-bundle",
   };
 
   async function loadRtcConfig() {
@@ -129,7 +133,7 @@
       const res = await fetch("/api/webrtc-config");
       const data = await res.json();
       if (res.ok && Array.isArray(data?.iceServers) && data.iceServers.length) {
-        rtcConfig = { iceServers: data.iceServers };
+        rtcConfig = { ...rtcConfig, iceServers: data.iceServers };
       }
     } catch {}
   }
@@ -577,7 +581,8 @@
   async function ensurePeerConnection() {
     if (pc) return pc;
     await loadRtcConfig();
-    pc = new RTCPeerConnection(rtcConfig);
+    const config = { ...rtcConfig, iceCandidatePoolSize: 10, bundlePolicy: "max-bundle" };
+    pc = new RTCPeerConnection(config);
 
     remoteStream = new MediaStream();
     if (remoteVideoEl) {
@@ -796,6 +801,71 @@
   const addFriendUsernameInput = document.getElementById("add-friend-username");
   const addFriendBtn = document.getElementById("add-friend-btn");
   const addFriendHintEl = document.getElementById("add-friend-hint");
+  const userSearchResultsEl = document.getElementById("user-search-results");
+  let searchUsersTimer = null;
+
+  async function searchAndShowUsers() {
+    const q = (addFriendUsernameInput && addFriendUsernameInput.value || "").trim();
+    if (q.length < 2 || !userSearchResultsEl) {
+      userSearchResultsEl.classList.add("hidden");
+      return;
+    }
+    try {
+      const res = await fetch("/api/users/search?q=" + encodeURIComponent(q) + "&exclude=" + encodeURIComponent(currentUsername));
+      const data = await res.json();
+      const list = Array.isArray(data.users) ? data.users : [];
+      userSearchResultsEl.innerHTML = "";
+      if (!list.length) {
+        userSearchResultsEl.classList.add("hidden");
+        return;
+      }
+      list.forEach((username) => {
+        const status = relationships.friends.includes(username)
+          ? "Arkadaş"
+          : relationships.outgoingRequests.includes(username)
+            ? "İstek bekliyor"
+            : relationships.incomingRequests.includes(username)
+              ? "İstek var"
+              : relationships.blocked.includes(username)
+                ? "Engelli"
+                : null;
+        const row = document.createElement("div");
+        row.className = "search-result-row";
+        const name = document.createElement("span");
+        name.className = "search-result-name";
+        name.textContent = username;
+        row.appendChild(name);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "search-result-btn";
+        if (status === "Arkadaş" || status === "İstek bekliyor" || status === "Engelli") {
+          btn.textContent = status;
+          btn.disabled = true;
+        } else {
+          btn.textContent = status === "İstek var" ? "Kabul/Reddet" : "Arkadaş ekle";
+          btn.onclick = () => {
+            if (status === "İstek var") return;
+            sendFriendRequest(username);
+            addFriendUsernameInput.value = "";
+            userSearchResultsEl.classList.add("hidden");
+          };
+        }
+        row.appendChild(btn);
+        userSearchResultsEl.appendChild(row);
+      });
+      userSearchResultsEl.classList.remove("hidden");
+    } catch {
+      userSearchResultsEl.classList.add("hidden");
+    }
+  }
+
+  addFriendUsernameInput?.addEventListener("input", () => {
+    clearTimeout(searchUsersTimer);
+    searchUsersTimer = setTimeout(searchAndShowUsers, 300);
+  });
+  addFriendUsernameInput?.addEventListener("blur", () => {
+    setTimeout(() => userSearchResultsEl?.classList.add("hidden"), 150);
+  });
 
   async function sendFriendRequest(targetUsername) {
     const hint = addFriendHintEl;
@@ -1067,6 +1137,7 @@
 
           renderUserList();
           renderGroupList();
+          if (addFriendUsernameInput?.value?.trim().length >= 2) searchAndShowUsers();
         });
 
         socket.on("groupMessage", (payload) => {

@@ -79,6 +79,17 @@ function createDb({ databaseUrl }) {
     return rows.length > 0;
   }
 
+  async function searchUsers(query, excludeUsername) {
+    const q = String(query || "").trim();
+    if (q.length < 2) return [];
+    const pattern = "%" + q + "%";
+    const { rows } = await pool.query(
+      `SELECT username FROM users WHERE username ILIKE $1 AND username != $2 ORDER BY username LIMIT 20`,
+      [pattern, excludeUsername || ""]
+    );
+    return rows.map((r) => r.username);
+  }
+
   async function createUser({ username, password }) {
     const passwordHash = await bcrypt.hash(String(password), 10);
     await pool.query(
@@ -270,6 +281,7 @@ function createDb({ databaseUrl }) {
     init,
     pool,
     userExists,
+    searchUsers,
     createUser,
     verifyUser,
     getRelationships,

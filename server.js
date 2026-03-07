@@ -1,3 +1,4 @@
+require("dotenv").config();
 const crypto = require("crypto");
 const express = require("express");
 const http = require("http");
@@ -90,6 +91,10 @@ function loadPersistence() {
       groupMembers.set(g.id, new Set(g.members || []));
     });
     nextGroupId = Math.max(1, (data.nextGroupId || 1));
+    sessions.clear();
+    (data.sessions || []).forEach(({ token, username }) => {
+      if (token && username) sessions.set(token, username);
+    });
   } catch (err) {
     if (err.code !== "ENOENT") console.error("Persistence load error:", err.message);
   }
@@ -110,6 +115,7 @@ function savePersistence() {
       const friendRequests = [];
       friendRequestsOutgoing.forEach((set, from) => set.forEach((to) => friendRequests.push([from, to])));
       const groupsList = Array.from(groups.values());
+      const sessionsList = Array.from(sessions.entries()).map(([token, username]) => ({ token, username }));
       const payload = JSON.stringify({
         users,
         friendPairs,
@@ -117,6 +123,7 @@ function savePersistence() {
         friendRequests,
         groups: groupsList,
         nextGroupId,
+        sessions: sessionsList,
       });
       fs.writeFileSync(PERSISTENCE_FILE, payload, "utf8");
     } catch (err) {
@@ -257,10 +264,12 @@ app.get("/", (req, res) => {
 // WebRTC ICE sunucuları (ses/görüntü araması için)
 app.get("/api/webrtc-config", (req, res) => {
   const iceServers = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
     { urls: "stun:stun2.l.google.com:19302" },
+    { urls: "stun:stun3.l.google.com:19302" },
+    { urls: "stun:stun4.l.google.com:19302" },
     { urls: "stun:stun.stunprotocol.org:3478" },
+    { urls: "stun:stun.freeswitch.org" },
   ];
   const turnUrl = process.env.TURN_URL;
   const turnUser = process.env.TURN_USERNAME;
@@ -312,6 +321,7 @@ app.post("/api/register", async (req, res) => {
 
     const sessionToken = crypto.randomBytes(24).toString("hex");
     sessions.set(sessionToken, trimmedUsername);
+    savePersistence();
     return res.json({ ok: true, username: trimmedUsername, sessionToken });
   } catch (err) {
     console.error("Register error:", err);
@@ -353,11 +363,38 @@ app.post("/api/login", async (req, res) => {
 
     const sessionToken = crypto.randomBytes(24).toString("hex");
     sessions.set(sessionToken, trimmedUsername);
+    savePersistence();
     return res.json({ ok: true, username: trimmedUsername, sessionToken });
   } catch (err) {
     console.error("Login error:", err);
     return res.status(500).json({ error: "Beklenmeyen bir hata oluştu." });
   }
+});
+
+app.get("/api/users/search", (req, res) => {
+  void (async () => {
+    const q = String(req.query.q || "").trim();
+    const exclude = String(req.query.exclude || "").trim();
+    if (q.length < 2) return res.json({ users: [] });
+
+    if (db) {
+      try {
+        const users = await db.searchUsers(q, exclude);
+        return res.json({ users });
+      } catch (err) {
+        return res.status(500).json({ users: [] });
+      }
+    }
+
+    const lower = q.toLowerCase();
+    const list = [];
+    for (const u of registeredUsers.keys()) {
+      if (u === exclude) continue;
+      if (u.toLowerCase().includes(lower)) list.push(u);
+      if (list.length >= 20) break;
+    }
+    return res.json({ users: list });
+  })();
 });
 
 app.get("/api/session", (req, res) => {
