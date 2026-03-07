@@ -820,16 +820,13 @@ button:active {
 }
 
 .message-row.me .message-bubble {
-  background: linear-gradient(
-    135deg,
-    #a855f7,
-    #ec4899,
-    #f97316,
-    #22c55e,
-    #06b6d4
-  );
+  background: rgba(99, 102, 241, 0.95);
   color: #020617;
   border-bottom-right-radius: 4px;
+}
+
+.message-row.me .message-bubble .message-time {
+  color: var(--text-muted);
 }
 
 .message-row.other .message-bubble {
