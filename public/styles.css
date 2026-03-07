@@ -715,6 +715,66 @@ button:active {
   border-color: transparent;
 }
 
+.mini-btn.icon-btn {
+  padding: 8px 12px;
+  min-width: 44px;
+}
+
+.mini-btn .btn-icon {
+  display: none;
+  font-size: 16px;
+}
+
+.mini-btn .mic-on,
+.mini-btn .cam-on { display: inline; }
+.mini-btn .mic-off,
+.mini-btn .cam-off { display: none; }
+
+.mini-btn:not(.active) .mic-on,
+.mini-btn:not(.active) .cam-on { display: none; }
+.mini-btn:not(.active) .mic-off { display: inline; }
+.mini-btn:not(.active) .cam-off { display: inline; }
+
+.call-duration {
+  font-size: 14px;
+  font-weight: 700;
+  color: #22c55e;
+  margin-top: 4px;
+}
+
+.call-duration.hidden {
+  display: none;
+}
+
+.mic-level-wrap {
+  width: 24px;
+  height: 40px;
+  background: rgba(15, 23, 42, 0.8);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  padding: 2px;
+}
+
+.mic-level-bar {
+  width: 100%;
+  height: 10%;
+  background: linear-gradient(to top, #22c55e, #86efac);
+  border-radius: 2px;
+  transition: height 0.08s ease;
+}
+
+#mic-level-wrap {
+  align-self: center;
+}
+
+.mini-btn.sharing,
+.mini-btn.sharing.active {
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+  color: #020617;
+}
+
 .video-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 220px);
@@ -742,6 +802,44 @@ button:active {
   display: grid;
   place-items: center;
   padding: 18px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.25s ease, visibility 0.25s ease;
+}
+
+.modal:not(.hidden) {
+  opacity: 1;
+  visibility: visible;
+}
+
+.modal-animate .modal-card {
+  transform: scale(0.9);
+  opacity: 0;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+
+.modal-animate:not(.hidden) .modal-card {
+  transform: scale(1);
+  opacity: 1;
+}
+
+.call-panel.hidden {
+  display: none;
+}
+
+.call-panel-animate {
+  animation: callPanelIn 0.3s ease;
+}
+
+@keyframes callPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .modal-card {

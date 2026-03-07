@@ -19,6 +19,9 @@
   const callStatusSubtitleEl = document.getElementById("call-status-subtitle");
   const toggleMicBtn = document.getElementById("toggle-mic-btn");
   const toggleCamBtn = document.getElementById("toggle-cam-btn");
+  const screenShareBtn = document.getElementById("screen-share-btn");
+  const callDurationEl = document.getElementById("call-duration");
+  const micLevelBar = document.getElementById("mic-level-bar");
   const localVideoEl = document.getElementById("local-video");
   const remoteVideoEl = document.getElementById("remote-video");
   const incomingModalEl = document.getElementById("incoming-call-modal");
@@ -128,6 +131,12 @@
   let callKind = null; // "audio" | "video"
   let incomingOffer = null; // { callId, fromUsername, kind, sdp }
   let callPeerUsername = null;
+  let ringtoneInterval = null;
+  let callDurationInterval = null;
+  let callStartTime = null;
+  let screenShareStream = null;
+  let analyserNode = null;
+  let micLevelAnimationId = null;
 
   // WebRTC config - sunucudan al (birden fazla STUN, TURN destekli)
   let rtcConfig = {
@@ -865,8 +874,93 @@
 
   function setIncomingModalVisible(visible) {
     if (!incomingModalEl) return;
-    if (visible) incomingModalEl.classList.remove("hidden");
-    else incomingModalEl.classList.add("hidden");
+    if (visible) {
+      incomingModalEl.classList.remove("hidden");
+      playRingtone();
+    } else {
+      incomingModalEl.classList.add("hidden");
+      stopRingtone();
+    }
+  }
+
+  function playRingtone() {
+    stopRingtone();
+    ringtoneInterval = setInterval(() => {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = 800;
+        osc.type = "sine";
+        gain.gain.setValueAtTime(0.2, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.3);
+      } catch {}
+    }, 1200);
+  }
+
+  function stopRingtone() {
+    if (ringtoneInterval) {
+      clearInterval(ringtoneInterval);
+      ringtoneInterval = null;
+    }
+  }
+
+  function startCallDurationTimer() {
+    stopCallDurationTimer();
+    callStartTime = Date.now();
+    if (callDurationEl) {
+      callDurationEl.classList.remove("hidden");
+      callDurationInterval = setInterval(() => {
+        const s = Math.floor((Date.now() - callStartTime) / 1000);
+        const m = Math.floor(s / 60);
+        callDurationEl.textContent = String(m).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+      }, 1000);
+    }
+  }
+
+  function stopCallDurationTimer() {
+    if (callDurationInterval) {
+      clearInterval(callDurationInterval);
+      callDurationInterval = null;
+    }
+    if (callDurationEl) callDurationEl.classList.add("hidden");
+  }
+
+  function startMicLevelMeter() {
+    if (!localStream || !micLevelBar) return;
+    const audioTracks = localStream.getAudioTracks();
+    if (!audioTracks.length) return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = ctx.createMediaStreamSource(localStream);
+      analyserNode = ctx.createAnalyser();
+      analyserNode.fftSize = 256;
+      source.connect(analyserNode);
+      const data = new Uint8Array(analyserNode.frequencyBinCount);
+
+      function update() {
+        if (!analyserNode || !micLevelBar) return;
+        analyserNode.getByteFrequencyData(data);
+        const avg = data.reduce((a, b) => a + b, 0) / data.length;
+        const pct = Math.min(100, Math.round((avg / 128) * 100));
+        micLevelBar.style.height = (10 + pct * 0.9) + "%";
+        micLevelAnimationId = requestAnimationFrame(update);
+      }
+      update();
+    } catch {}
+  }
+
+  function stopMicLevelMeter() {
+    if (micLevelAnimationId) {
+      cancelAnimationFrame(micLevelAnimationId);
+      micLevelAnimationId = null;
+    }
+    analyserNode = null;
+    if (micLevelBar) micLevelBar.style.height = "10%";
   }
 
   function setCallStatus(title, subtitle) {
@@ -910,6 +1004,7 @@
       if (!pc) return;
       if (pc.connectionState === "connected") {
         setCallStatus("Arama bağlandı", callPeerUsername ? `${callPeerUsername} ile` : "");
+        startCallDurationTimer();
       } else if (pc.connectionState === "disconnected") {
         setCallStatus("Bağlantı koptu", "Tekrar deniyor…");
       } else if (pc.connectionState === "failed") {
@@ -945,6 +1040,46 @@
       if (kind === "video") toggleCamBtn.classList.add("active");
       else toggleCamBtn.classList.remove("active");
     }
+    if (screenShareBtn) {
+      if (kind === "video") screenShareBtn.classList.remove("hidden");
+      else screenShareBtn.classList.add("hidden");
+    }
+    if (toggleCamBtn) {
+      if (kind === "audio") toggleCamBtn.classList.add("hidden");
+      else toggleCamBtn.classList.remove("hidden");
+    }
+    startMicLevelMeter();
+  }
+
+  async function startScreenShare() {
+    if (!pc || !localStream) return;
+    try {
+      screenShareStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      const videoTrack = screenShareStream.getVideoTracks()[0];
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+      if (sender) sender.replaceTrack(videoTrack);
+      if (localVideoEl) localVideoEl.srcObject = screenShareStream;
+      screenShareBtn.classList.add("sharing");
+      videoTrack.onended = () => stopScreenShare();
+    } catch (err) {
+      setCallStatus("Ekran paylaşımı", "İzin verilmedi veya hata oluştu.");
+    }
+  }
+
+  function stopScreenShare() {
+    if (screenShareStream) {
+      screenShareStream.getTracks().forEach((t) => t.stop());
+      screenShareStream = null;
+    }
+    if (localStream && localVideoEl) localVideoEl.srcObject = localStream;
+    if (pc && localStream) {
+      const videoTrack = localStream.getVideoTracks()[0];
+      if (videoTrack) {
+        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+        if (sender) sender.replaceTrack(videoTrack);
+      }
+    }
+    if (screenShareBtn) screenShareBtn.classList.remove("sharing");
   }
 
   function stopLocalMedia() {
@@ -983,6 +1118,9 @@
     setCallPanelVisible(false);
     setCallButtonsInCall(false);
     setCallStatus("Arama", "");
+    stopCallDurationTimer();
+    stopMicLevelMeter();
+    stopScreenShare();
     resetCallState();
   }
 
@@ -1032,6 +1170,7 @@
   async function acceptIncomingCall() {
     if (!socket || !incomingOffer) return;
     if (pc) return;
+    stopRingtone();
 
     const { callId, fromUsername, kind, sdp } = incomingOffer;
     currentCallId = callId;
@@ -1068,6 +1207,7 @@
     if (!socket || !incomingOffer) return;
     socket.emit("call:reject", { callId: incomingOffer.callId });
     setIncomingModalVisible(false);
+    stopRingtone();
     incomingOffer = null;
   }
 
@@ -1101,6 +1241,10 @@
   callAudioBtn?.addEventListener("click", () => placeCall("audio"));
   callVideoBtn?.addEventListener("click", () => placeCall("video"));
   callHangupBtn?.addEventListener("click", () => hangupCall());
+  screenShareBtn?.addEventListener("click", () => {
+    if (screenShareBtn.classList.contains("sharing")) stopScreenShare();
+    else startScreenShare();
+  });
   incomingAcceptBtn?.addEventListener("click", () => acceptIncomingCall());
   incomingRejectBtn?.addEventListener("click", () => rejectIncomingCall());
 

@@ -124,20 +124,29 @@
               </div>
             </div>
 
-            <section class="call-panel hidden" id="call-panel">
+            <section class="call-panel call-panel-animate hidden" id="call-panel">
               <div class="call-panel-header">
                 <div>
                   <div class="call-title" id="call-status-title">Arama</div>
                   <div class="call-subtitle" id="call-status-subtitle">
                     Bağlanılıyor...
                   </div>
+                  <div class="call-duration hidden" id="call-duration">00:00</div>
                 </div>
                 <div class="call-toggles">
-                  <button type="button" class="mini-btn" id="toggle-mic-btn">
-                    Mikrofon
+                  <div class="mic-level-wrap" id="mic-level-wrap">
+                    <div class="mic-level-bar" id="mic-level-bar"></div>
+                  </div>
+                  <button type="button" class="mini-btn icon-btn" id="toggle-mic-btn" title="Mikrofon">
+                    <span class="btn-icon mic-on">🎤</span>
+                    <span class="btn-icon mic-off">🔇</span>
                   </button>
-                  <button type="button" class="mini-btn" id="toggle-cam-btn">
-                    Kamera
+                  <button type="button" class="mini-btn icon-btn" id="toggle-cam-btn" title="Kamera">
+                    <span class="btn-icon cam-on">📹</span>
+                    <span class="btn-icon cam-off">📷</span>
+                  </button>
+                  <button type="button" class="mini-btn icon-btn hidden" id="screen-share-btn" title="Ekran paylaş">
+                    <span class="btn-icon">🖥️</span>
                   </button>
                 </div>
               </div>
@@ -170,7 +179,7 @@
         </div>
       </section>
 
-      <div class="modal hidden" id="create-group-modal">
+      <div class="modal modal-animate hidden" id="create-group-modal">
         <div class="modal-card">
           <div class="modal-title">Yeni Grup Oluştur</div>
           <p class="subtitle">Sadece arkadaşlarını ekleyebilirsin. Grup adı ve en az bir arkadaş seç.</p>
@@ -186,7 +195,7 @@
         </div>
       </div>
 
-      <div class="modal hidden" id="incoming-call-modal">
+      <div class="modal modal-animate hidden" id="incoming-call-modal">
         <div class="modal-card">
           <div class="modal-title" id="incoming-call-title">Gelen arama</div>
           <div class="modal-subtitle" id="incoming-call-subtitle"></div>
@@ -201,7 +210,7 @@
         </div>
       </div>
 
-      <div class="modal hidden" id="contact-modal">
+      <div class="modal modal-animate hidden" id="contact-modal">
         <div class="modal-card">
           <div class="modal-title">Bize Ulaşın</div>
           <div class="modal-subtitle">
